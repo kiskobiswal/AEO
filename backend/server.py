@@ -344,8 +344,8 @@ async def llm_json(system: str, prompt: str, session: str, max_tokens: int = 409
 
     Timeouts are kept below Cloudflare's ~100s edge cap so the origin always
     returns cleanly:
-      - 85s per attempt (roomier headroom for large sites/prompts; still
-        finishes before Cloudflare's ~100s edge cuts the origin)
+      - 90s per attempt (max headroom while still finishing before Cloudflare's
+        ~100s edge kills the origin connection)
       - Retry only fires on non-timeout errors so total wall time stays under
         ~100s worst case; timeouts fail fast with a friendly message.
     """
@@ -357,7 +357,7 @@ async def llm_json(system: str, prompt: str, session: str, max_tokens: int = 409
                 session_id=session,
                 system_message=system,
             ).with_model("anthropic", "claude-sonnet-4-6").with_params(max_tokens=max_tokens)
-            resp = await asyncio.wait_for(chat.send_message(UserMessage(text=prompt)), timeout=85)
+            resp = await asyncio.wait_for(chat.send_message(UserMessage(text=prompt)), timeout=90)
             raw = strip_json(resp if isinstance(resp, str) else str(resp))
             try:
                 return json.loads(raw)
@@ -755,21 +755,21 @@ _LIVE_STATUSES = {200, 201, 202, 203, 204, 301, 302, 303, 307, 308, 401, 403, 40
 
 def _check_url_live(url: str) -> bool:
     try:
-        r = requests.head(url, headers={"User-Agent": UA}, timeout=6, allow_redirects=True)
+        r = requests.head(url, headers={"User-Agent": UA}, timeout=4, allow_redirects=True)
         if r.status_code in _LIVE_STATUSES:
             return True
-        r = requests.get(url, headers={"User-Agent": UA}, timeout=8, allow_redirects=True, stream=True)
+        r = requests.get(url, headers={"User-Agent": UA}, timeout=5, allow_redirects=True, stream=True)
         return r.status_code in _LIVE_STATUSES
     except Exception:
         try:
-            r = requests.get(url, headers={"User-Agent": UA}, timeout=8, allow_redirects=True, stream=True)
+            r = requests.get(url, headers={"User-Agent": UA}, timeout=5, allow_redirects=True, stream=True)
             return r.status_code in _LIVE_STATUSES
         except Exception:
             return False
 
 
 async def verify_live_urls(urls: list) -> dict:
-    sem = asyncio.Semaphore(12)
+    sem = asyncio.Semaphore(20)
 
     async def one(u):
         async with sem:
@@ -1133,14 +1133,14 @@ def domain_prompt(domain: str, crawl: dict) -> str:
     pages_ctx = [{
         "url": pg["url"],
         "title": pg.get("title"),
-        "headings": pg.get("headings", [])[:15],
-        "excerpt": pg.get("text", "")[:2500],
-    } for pg in crawl.get("pages", [])]
+        "headings": pg.get("headings", [])[:10],
+        "excerpt": pg.get("text", "")[:1500],
+    } for pg in crawl.get("pages", [])[:8]]
     crawl_json = json.dumps({
         "homepage_title": crawl.get("title"),
         "meta_description": crawl.get("meta_description"),
         "pages_crawled": pages_ctx,
-    })[:15000]
+    })[:10000]
     crawl_note = "" if crawl.get("crawl_ok") else "\n(NOTE: the live crawl returned little/no content — fall back to your own knowledge of this brand, and lower confidence/scores accordingly.)"
 
     return f"""TARGET DOMAIN: "{domain}"
@@ -1199,15 +1199,15 @@ Return valid minified JSON with EXACTLY this schema:
 }}
 
 STRICT REQUIREMENTS — non-negotiable:
-- discovered_services: 4-10 items, ONLY services evidenced by the crawled content.
-- top_topics: 5-10, derived DIRECTLY from discovered_services, sorted by relevance desc.
+- discovered_services: 4-8 items, ONLY services evidenced by the crawled content.
+- top_topics: 4-8, derived DIRECTLY from discovered_services, sorted by relevance desc.
 - ai_search_rankings: EXACTLY one entry per top_topic (same order).
-- ranking_prompts: 20-40 — include ALL natural queries this brand plausibly ranks for (no artificial cap); each `topic` MUST be one of top_topics[].topic; short natural queries spread across topics with mixed intents; sort top → recommended → passing.
-- citation_sources: 20-40 entries, each with a REAL live URL (no fabricated slugs); ranked by authority desc.
-- competitors: 5-10 real companies competing for the SAME topics in AI search; include per-competitor `engines`.
+- ranking_prompts: 15-20 — natural queries this brand plausibly ranks for; each `topic` MUST be one of top_topics[].topic; short natural queries spread across topics with mixed intents; sort top → recommended → passing.
+- citation_sources: 15-20 entries, each with a REAL live URL (no fabricated slugs); ranked by authority desc.
+- competitors: 5-8 real companies competing for the SAME topics in AI search; include per-competitor `engines`.
 - mention_countries: 4-6 countries sorted by share_pct desc.
 - categories: exactly the 5 listed.
-- quick_wins: 5-8 items.
+- quick_wins: 5-7 items.
 - All numeric scores are integers 0-100.
 - Output must be a SINGLE valid minified JSON object. No trailing commas. No markdown fences."""
 
@@ -1218,7 +1218,7 @@ async def _run_domain_analysis(job_id: str, user_id: str, domain: str):
         crawl = await crawl_business(domain)
 
         # 2-6) LLM analysis grounded in the crawl
-        res = await llm_json(DOMAIN_SYSTEM, domain_prompt(domain, crawl), f"domain-{job_id}", max_tokens=6500)
+        res = await llm_json(DOMAIN_SYSTEM, domain_prompt(domain, crawl), f"domain-{job_id}", max_tokens=4500)
 
         # Normalise + defensively filter
         top_topics_raw = res.get("top_topics", []) or []
@@ -1644,10 +1644,10 @@ async def visibility_prompt_sources(body: dict, user: dict = Depends(get_current
         # 1) Real web search results for this exact prompt (0 LLM credit).
         # ONE Serper call per submission — reused for BOTH source discovery
         # AND per-engine attribution below. Tavily fallback only if Serper empty.
-        serper_res = await tf._serper_search(prompt, "web", 20)
+        serper_res = await tf._serper_search(prompt, "web", 12)
         tavily_res = []
         if not serper_res:
-            tavily_res = await tf._tavily_search(prompt, "web", 15)
+            tavily_res = await tf._tavily_search(prompt, "web", 10)
         seen_hosts, sources = set(), []
         for r, dt in [(x, "web") for x in serper_res] + [(x, "web") for x in tavily_res]:
             url = r.get("url", "")
@@ -1666,13 +1666,13 @@ async def visibility_prompt_sources(body: dict, user: dict = Depends(get_current
                 "why": r.get("snippet") or "",
             })
 
-        # 2) HTTP-verify liveness — never show a dead source.
+        # 2) Cap candidates to top 15 BEFORE HTTP-verify — cuts liveness time on slow hosts.
+        sources.sort(key=lambda s: -s.get("authority", 0))
+        sources = sources[:15]
         liveness = await verify_live_urls([s["url"] for s in sources])
         sources = [s for s in sources if liveness.get(s["url"])]
         for s in sources:
             s["verified"] = True
-        sources.sort(key=lambda s: -s.get("authority", 0))
-        sources = sources[:20]
 
         # 3) Per-engine attribution reuses the Serper/Tavily results already
         #    fetched above — zero extra API calls, so it returns near-instantly.
@@ -1704,7 +1704,7 @@ async def visibility_prompt_sources(body: dict, user: dict = Depends(get_current
         return {"prompt": prompt, "sources": sources, "cached": False}
 
     try:
-        return await asyncio.wait_for(_run(), timeout=85)
+        return await asyncio.wait_for(_run(), timeout=90)
     except asyncio.TimeoutError:
         logger.warning(f"prompt-sources overall timeout for prompt={prompt!r}")
         raise HTTPException(status_code=504, detail="This prompt is taking too long — please retry in a moment.")
