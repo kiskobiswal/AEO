@@ -344,7 +344,8 @@ async def llm_json(system: str, prompt: str, session: str, max_tokens: int = 409
 
     Timeouts are kept below Cloudflare's ~100s edge cap so the origin always
     returns cleanly:
-      - 60s per attempt (gives large sites/prompts more headroom)
+      - 85s per attempt (roomier headroom for large sites/prompts; still
+        finishes before Cloudflare's ~100s edge cuts the origin)
       - Retry only fires on non-timeout errors so total wall time stays under
         ~100s worst case; timeouts fail fast with a friendly message.
     """
@@ -356,7 +357,7 @@ async def llm_json(system: str, prompt: str, session: str, max_tokens: int = 409
                 session_id=session,
                 system_message=system,
             ).with_model("anthropic", "claude-sonnet-4-6").with_params(max_tokens=max_tokens)
-            resp = await asyncio.wait_for(chat.send_message(UserMessage(text=prompt)), timeout=60)
+            resp = await asyncio.wait_for(chat.send_message(UserMessage(text=prompt)), timeout=85)
             raw = strip_json(resp if isinstance(resp, str) else str(resp))
             try:
                 return json.loads(raw)
@@ -393,10 +394,10 @@ You MUST respond with ONLY valid minified JSON, no markdown, no prose. Follow th
 
 
 def analysis_prompt(norm: dict, target_query: Optional[str]) -> str:
-    body = norm["body_text"][:12000]
+    body = norm["body_text"][:6000]
     ctx = {
         "title": norm["title"],
-        "headings": norm["headings"][:40],
+        "headings": norm["headings"][:30],
         "word_count": norm["word_count"],
         "meta_tags": norm["meta_tags"],
         "existing_schema_types": [x.get("@type") for x in norm["existing_schema"] if isinstance(x, dict)],
@@ -1217,7 +1218,7 @@ async def _run_domain_analysis(job_id: str, user_id: str, domain: str):
         crawl = await crawl_business(domain)
 
         # 2-6) LLM analysis grounded in the crawl
-        res = await llm_json(DOMAIN_SYSTEM, domain_prompt(domain, crawl), f"domain-{job_id}", max_tokens=16000)
+        res = await llm_json(DOMAIN_SYSTEM, domain_prompt(domain, crawl), f"domain-{job_id}", max_tokens=6500)
 
         # Normalise + defensively filter
         top_topics_raw = res.get("top_topics", []) or []
@@ -2061,7 +2062,7 @@ async def brand_consistency(body: BrandConsistencyInput, user: dict = Depends(ge
         fetched = await tf.tf_fetch([home_url], ttl=86400)
         rr = fetched.get("results") or []
         if rr:
-            home_text = (rr[0].get("text") or "")[:5000]
+            home_text = (rr[0].get("text") or "")[:3000]
 
     # 3) LLM structures canonical + per-platform features/pricing + inconsistencies
     #    from the REAL evidence only (never invents URLs)
@@ -2072,7 +2073,7 @@ BRAND WEBSITE TEXT (truncated):
 \"\"\"{home_text}\"\"\"
 
 REAL PLATFORM EVIDENCE (search snippets found on each platform):
-{json.dumps(evidence_for_llm)[:9000]}
+{json.dumps(evidence_for_llm)[:5000]}
 
 Return JSON:
 {{
@@ -2087,7 +2088,7 @@ Return JSON:
 Only include platforms in platform_analysis that appear in the evidence. Provide up to 8 inconsistencies and 4-8 recommendations. If evidence is sparse, give a lower consistency_score and note it in a recommendation."""
     llm = {}
     try:
-        llm = await llm_json(system, prompt, f"brand-{user['id']}-{secrets.token_hex(4)}", max_tokens=4000)
+        llm = await llm_json(system, prompt, f"brand-{user['id']}-{secrets.token_hex(4)}", max_tokens=2500)
     except Exception as e:
         logger.warning(f"brand llm structuring failed: {e}")
 
@@ -2139,19 +2140,18 @@ async def pr_coverage(body: PRInput, user: dict = Depends(get_current_user)):
     brand_term = tf.brand_name_from_domain(q) if is_domain else q
     own = tf.root_domain(tf.host_of(q)) if is_domain else None
 
-    # Real press: several web searches across multiple result pages -> more distinct URLs
+    # Real press: fewer, tighter queries × 2 pages -> ~8 TinyFish calls total
+    # (was 6×3=18). Keeps external-API usage minimal per submission.
     base_queries = [
         f'{brand_term} news',
-        f'{brand_term} announcement',
         f'"{brand_term}" (funding OR raises OR seed OR "series a" OR launch OR announces OR partnership OR acquires)',
         f'"{brand_term}" (review OR interview OR feature OR profile OR spotlight OR "featured in")',
-        f'"{brand_term}" (press release OR "announced today" OR PRNewswire OR "Business Wire")',
-        f'"{brand_term}" (article OR coverage OR report OR magazine OR editorial)',
+        f'"{brand_term}" (press release OR PRNewswire OR "Business Wire" OR article OR coverage)',
     ]
     tasks = []
     for bq in base_queries:
-        for pg in (1, 2, 3):
-            tasks.append(tf.tf_search(bq, max_results=15, page=pg, prefer="tinyfish_only"))
+        for pg in (1, 2):
+            tasks.append(tf.tf_search(bq, max_results=12, page=pg, prefer="tinyfish_only"))
     searches = await asyncio.gather(*tasks)
     REDIRECT_HOSTS = {"google.com", "bing.com", "duckduckgo.com", "news.google.com", "yahoo.com"}
     # NOT press: directories, review/listing sites, reference, social, community, app stores
@@ -2197,7 +2197,7 @@ async def pr_coverage(body: PRInput, user: dict = Depends(get_current_user)):
                 "type": "news",
                 "pr_type": "paid" if host in PR_WIRE_HOSTS else "organic",
             })
-    press = press[:50]
+    press = press[:30]
 
     # HTTP-verify every press link — never surface a dead article to the user.
     liveness = await verify_live_urls([p["url"] for p in press])
@@ -2210,7 +2210,7 @@ async def pr_coverage(body: PRInput, user: dict = Depends(get_current_user)):
     prompt = f"""BRAND: {brand_term}
 
 REAL PRESS RESULTS:
-{json.dumps([{'i': i, 'publication': p['publication'], 'headline': p['headline'], 'snippet': p['description'], 'url': p['url']} for i, p in enumerate(press)])[:14000]}
+{json.dumps([{'i': i, 'publication': p['publication'], 'headline': p['headline'], 'snippet': p['description'], 'url': p['url']} for i, p in enumerate(press)])[:8000]}
 
 Return JSON:
 {{
@@ -2219,10 +2219,10 @@ Return JSON:
    {{"category":"Tech","outlets":[{{"outlet":"TechCrunch","beat":"startups / product launches","why":"why relevant to this brand","domain":"techcrunch.com"}}]}}
  ]
 }}
-For "press" return one object PER index above (do not skip indices); set relevant=false only for clear namesakes / non-press pages. Provide 5-7 pitch categories with 4-6 real outlets each (real outlet domains)."""
+For "press" return one object PER index above (do not skip indices); set relevant=false only for clear namesakes / non-press pages. Provide 4-6 pitch categories with 3-5 real outlets each (real outlet domains)."""
     llm = {}
     try:
-        llm = await llm_json(system, prompt, f"pr-{user['id']}-{secrets.token_hex(4)}", max_tokens=6000)
+        llm = await llm_json(system, prompt, f"pr-{user['id']}-{secrets.token_hex(4)}", max_tokens=3500)
     except Exception as e:
         logger.warning(f"pr llm failed: {e}")
 
