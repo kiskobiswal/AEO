@@ -254,34 +254,41 @@ async def tf_search(query: str, domain_type: str = "web", max_results: int = 10,
                     prefer: str = None) -> list:
     """Run one web/news search for REAL URLs (never model-invented).
 
-    prefer="tinyfish" → TinyFish Search API first (used by PR Coverage &
-      Brand Consistency, which rely on TinyFish web-search + fetch), falling
-      back to Serper → Tavily → DuckDuckGo if TinyFish returns nothing.
-    default → Serper.dev (Google) → Tavily → TinyFish → DuckDuckGo (used by
-      Prompt Ranking & AI Citation Sources)."""
-    if prefer == "tinyfish":
+    Provider routing (per user's API-usage rules — minimal credit spend):
+
+    * prefer="tinyfish_only" → TinyFish ONLY. DuckDuckGo is used ONLY if TinyFish
+      returns nothing. Never touches Serper or Tavily (keeps their credits free
+      for citation/ranking use). Used by: Project scan (Brand, PR, Reviews,
+      Citation Opportunities, Web Citations, Discovered services), Domain
+      Analysis TinyFish sources, Citation Sources: By Domain, Brand Consistency,
+      PR Coverage, Reddit finder helpers.
+
+    * prefer="citation" → ONE Serper.dev call per submission. Only if Serper
+      returns nothing does it fall back to ONE Tavily call. Never touches
+      TinyFish/DuckDuckGo. Used by: Citation Sources: By Query, Ranking Prompts
+      / prompt-sources, AI Visibility, per-engine attribution.
+
+    * prefer="tinyfish" (legacy) → same as tinyfish_only. Kept for callers still
+      passing the older keyword. No cross-provider chain.
+
+    * default (no prefer) → same as prefer="citation" (Serper → Tavily). Costs
+      one paid-API call max per submission."""
+    prefer = prefer or "citation"
+
+    if prefer in ("tinyfish", "tinyfish_only"):
         tfres = await _tinyfish_search(query, domain_type, max_results, recency_minutes, purpose, page)
         if tfres:
             return tfres
-        serper = await _serper_search(query, domain_type, max_results)
-        if serper:
-            return serper
-        tavily = await _tavily_search(query, domain_type, max_results)
-        if tavily:
-            return tavily
         return await asyncio.to_thread(_ddgs_search_sync, query, domain_type, max_results)
 
-    # Default: Serper → Tavily → TinyFish → DuckDuckGo
+    # prefer == "citation": one Serper call, Tavily fallback only if Serper empty.
     serper = await _serper_search(query, domain_type, max_results)
     if serper:
         return serper
     tavily = await _tavily_search(query, domain_type, max_results)
     if tavily:
         return tavily
-    tfres = await _tinyfish_search(query, domain_type, max_results, recency_minutes, purpose, page)
-    if tfres:
-        return tfres
-    return await asyncio.to_thread(_ddgs_search_sync, query, domain_type, max_results)
+    return []
 
 
 async def tf_search_many(queries: list, domain_type: str = "web", max_results: int = 6,

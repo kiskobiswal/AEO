@@ -1006,11 +1006,12 @@ async def real_engine_attribution(brand: str, query: str, urls: list,
         if cached and cached.get("provider_urls"):
             provider_urls = cached["provider_urls"]
         else:
-            # Real grounded results from both providers, concurrently (no LLM cost).
-            serper_res, tavily_res = await asyncio.gather(
-                tf._serper_search(q, "web", 20),
-                tf._tavily_search(q, "web", 20),
-            )
+            # ONE call per submission: Serper first; Tavily only if Serper is empty.
+            # Never runs both concurrently — keeps external API usage minimal.
+            serper_res = await tf._serper_search(q, "web", 20)
+            tavily_res = []
+            if not serper_res:
+                tavily_res = await tf._tavily_search(q, "web", 20)
             provider_urls = {
                 "serper": [r.get("url", "") for r in (serper_res or []) if r.get("url")],
                 "tavily": [r.get("url", "") for r in (tavily_res or []) if r.get("url")],
@@ -1069,8 +1070,8 @@ async def real_citation_sources(brand: str, domain: Optional[str]) -> list:
         f"{brand} site:gartner.com",
     ]
     general = [brand, f"{brand} review", f'"{brand}"']
-    web_batches = await tf.tf_search_many(site_queries + general, max_results=3)
-    news = await tf.tf_search(brand, domain_type="news", max_results=6)
+    web_batches = await tf.tf_search_many(site_queries + general, max_results=3, prefer="tinyfish_only")
+    news = await tf.tf_search(brand, domain_type="news", max_results=6, prefer="tinyfish_only")
 
     own = tf.root_domain(tf.host_of(domain)) if domain else None
     seen, cites = set(), []
@@ -1640,12 +1641,12 @@ async def visibility_prompt_sources(body: dict, user: dict = Depends(get_current
             return {"prompt": prompt, "sources": cached, "cached": True}
 
         # 1) Real web search results for this exact prompt (0 LLM credit).
-        # One Serper + one Tavily call for this prompt — reused for BOTH source
-        # discovery and per-engine attribution below (no duplicate/extra calls).
-        serper_res, tavily_res = await asyncio.gather(
-            tf._serper_search(prompt, "web", 20),
-            tf._tavily_search(prompt, "web", 15),
-        )
+        # ONE Serper call per submission — reused for BOTH source discovery
+        # AND per-engine attribution below. Tavily fallback only if Serper empty.
+        serper_res = await tf._serper_search(prompt, "web", 20)
+        tavily_res = []
+        if not serper_res:
+            tavily_res = await tf._tavily_search(prompt, "web", 15)
         seen_hosts, sources = set(), []
         for r, dt in [(x, "web") for x in serper_res] + [(x, "web") for x in tavily_res]:
             url = r.get("url", "")
@@ -1793,14 +1794,13 @@ async def citations(body: CitationInput, user: dict = Depends(get_current_user))
         if dom.startswith("www."):
             dom = dom[4:]
 
-    # 1) REAL search first (TinyFish if available, otherwise DuckDuckGo fallback).
-    #    Every URL is a real search-engine result, then HTTP-verified live.
-    # One Serper + one Tavily call for this query — reused for BOTH source
-    # discovery and per-engine attribution below (no duplicate/extra API calls).
-    serper_res, tavily_res = await asyncio.gather(
-        tf._serper_search(query, "web", 25),
-        tf._tavily_search(query, "web", 20),
-    )
+    # 1) REAL search first — ONE Serper call per submission (Tavily fallback
+    #    only if Serper returns nothing). Every URL is a real search result,
+    #    then HTTP-verified live. Zero LLM credits, zero TinyFish credits.
+    serper_res = await tf._serper_search(query, "web", 25)
+    tavily_res = []
+    if not serper_res:
+        tavily_res = await tf._tavily_search(query, "web", 20)
     seen_hosts, sources = set(), []
     for r, dt in [(x, "web") for x in serper_res] + [(x, "web") for x in tavily_res]:
         url = r.get("url", "")
@@ -2014,7 +2014,7 @@ async def brand_consistency(body: BrandConsistencyInput, user: dict = Depends(ge
 
     # 1) Real per-platform searches (concurrent) -> real, verifiable listing URLs
     queries = [f"{brand_term} site:{site}" for (_, _, site) in BRAND_PLATFORMS]
-    per_platform = await tf.tf_search_many(queries, max_results=4, prefer="tinyfish")
+    per_platform = await tf.tf_search_many(queries, max_results=4, prefer="tinyfish_only")
 
     platforms, evidence_for_llm = [], []
     # Collect all top-URL candidates for a single concurrent liveness check
@@ -2053,7 +2053,7 @@ async def brand_consistency(body: BrandConsistencyInput, user: dict = Depends(ge
     if is_domain:
         home_url = f"https://{q}"
     else:
-        web = await tf.tf_search(brand_term, max_results=5, prefer="tinyfish")
+        web = await tf.tf_search(brand_term, max_results=5, prefer="tinyfish_only")
         if web:
             home_url = web[0].get("url")
             domain_host = tf.root_domain(tf.host_of(home_url))
@@ -2151,7 +2151,7 @@ async def pr_coverage(body: PRInput, user: dict = Depends(get_current_user)):
     tasks = []
     for bq in base_queries:
         for pg in (1, 2, 3):
-            tasks.append(tf.tf_search(bq, max_results=15, page=pg, prefer="tinyfish"))
+            tasks.append(tf.tf_search(bq, max_results=15, page=pg, prefer="tinyfish_only"))
     searches = await asyncio.gather(*tasks)
     REDIRECT_HOSTS = {"google.com", "bing.com", "duckduckgo.com", "news.google.com", "yahoo.com"}
     # NOT press: directories, review/listing sites, reference, social, community, app stores
