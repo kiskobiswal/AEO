@@ -5,9 +5,10 @@ import { Button } from "@/components/ui/button";
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 
 /*
- * Stripe redirects here with ?session_id=cs_test_... on success.
+ * Razorpay redirects here (via a manual navigate) with ?session_id=order_XXX on success.
  * We poll /api/subscriptions/status/<id> until it flips to "paid".
- * On success the backend has already extended plan_expires_at by 30 days.
+ * On success the backend has already extended plan_expires_at by 30 days
+ * (via the /verify call from the Checkout modal handler).
  */
 
 export default function PaymentSuccess() {

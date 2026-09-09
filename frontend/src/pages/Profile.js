@@ -274,6 +274,30 @@ export default function Profile() {
         </div>
       </div>
 
+      {/* Coming Soon banner for the custom-domain / Connect Website flow */}
+      <div
+        role="status"
+        aria-label="Custom domain coming soon"
+        data-testid="custom-domain-coming-soon"
+        className="relative overflow-hidden rounded-xl border border-amber-300/60 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-4 mb-4 flex items-center gap-3"
+      >
+        <div className="shrink-0 w-9 h-9 rounded-lg bg-amber-500/15 text-amber-700 grid place-items-center">
+          <Globe size={18} />
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-head font-extrabold text-sm text-amber-900">Custom domain — Coming Soon</span>
+            <span className="text-[10px] uppercase tracking-widest font-bold bg-amber-500 text-white rounded-full px-2 py-0.5">Beta</span>
+          </div>
+          <p className="text-xs text-amber-800/90 mt-0.5 max-w-2xl">
+            You'll soon be able to point your own domain at Citetail and apply
+            fixes live from the dashboard. The Connect Website flow below is a
+            preview — feel free to explore, but the on-site apply pipeline is
+            still being rolled out.
+          </p>
+        </div>
+      </div>
+
       <Card className="p-5 rounded-xl border-border/60 mb-6">
         <div className="flex items-center gap-3 flex-wrap">
           <Input

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { http, formatApiErrorDetail } from "@/lib/api";
+import { openRazorpayCheckout } from "@/lib/razorpay";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,7 +11,7 @@ import { CreditCard, Loader2, ShieldCheck, ArrowLeft } from "lucide-react";
 
 /*
  * Signup page: /signup?plan=starter|growth|pro
- * Creates a pending-payment account, then redirects to Stripe checkout.
+ * Creates a pending-payment account and opens the Razorpay Checkout modal.
  */
 
 export default function Signup() {
@@ -37,9 +38,23 @@ export default function Signup() {
         name: form.name, email: form.email, password: form.password,
         plan: planSlug, origin_url: window.location.origin,
       });
-      // Persist session_id so the return URL can poll status even after Stripe redirect
-      try { sessionStorage.setItem("citetail:last_session_id", data.session_id); } catch { /* ignore */ }
-      window.location.href = data.checkout_url;
+      try { sessionStorage.setItem("citetail:last_session_id", data.session_id || data.order_id); } catch { /* ignore */ }
+
+      await openRazorpayCheckout(data, {
+        planName: plan?.name,
+        prefill: { name: data.name || form.name, email: data.email || form.email },
+        onSuccess: (orderId) => {
+          window.location.href = `/payment/success?session_id=${encodeURIComponent(orderId)}`;
+        },
+        onFailure: (reason) => {
+          setLoading(false);
+          if (reason === "cancelled") {
+            toast.message("Checkout closed", { description: "You can complete payment from the login page any time." });
+          } else {
+            toast.error(reason || "Payment failed");
+          }
+        },
+      });
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || "Signup failed");
       setLoading(false);
@@ -52,7 +67,7 @@ export default function Signup() {
         <a href="/pricing" className="relative flex items-center gap-2 text-white/70 hover:text-white text-sm w-fit"><ArrowLeft size={14} /> Back to pricing</a>
         <div className="relative">
           <h2 className="font-head text-4xl font-extrabold tracking-tight leading-tight">Create your Citetail account.</h2>
-          <p className="text-white/60 mt-4 max-w-md">Payment is handled on Stripe's secure checkout. Your account activates automatically the moment payment succeeds.</p>
+          <p className="text-white/60 mt-4 max-w-md">Payment is handled on Razorpay's secure checkout. Your account activates automatically the moment payment succeeds.</p>
           {plan && (
             <Card className="bg-white/5 border-white/10 mt-8 p-6 text-white">
               <div className="text-[10px] uppercase tracking-[0.16em] text-white/50 font-bold">Selected plan</div>
@@ -71,7 +86,7 @@ export default function Signup() {
       <div className="flex items-center justify-center p-6 sm:p-12">
         <form onSubmit={submit} className="w-full max-w-sm space-y-5" data-testid="signup-form">
           <h1 className="font-head text-3xl font-extrabold tracking-tight">Start your {plan?.name || "plan"}</h1>
-          <p className="text-muted-foreground text-sm">You'll be sent to Stripe to complete payment (${plan?.price_usd || "—"}/month).</p>
+          <p className="text-muted-foreground text-sm">You'll be sent to Razorpay to complete payment (${plan?.price_usd || "—"}/month).</p>
           <div>
             <Label>Full name</Label>
             <Input required value={form.name} onChange={setField("name")} data-testid="signup-name" />
@@ -87,7 +102,7 @@ export default function Signup() {
           <Button type="submit" className="w-full btn-brand hover:opacity-90" disabled={loading} data-testid="signup-submit">
             {loading ? <Loader2 className="animate-spin" size={16} /> : <><CreditCard size={16} className="mr-2" />Continue to secure checkout</>}
           </Button>
-          <p className="text-[11px] text-muted-foreground flex items-center gap-1.5"><ShieldCheck size={12} className="text-emerald-500" /> Card details never touch our servers — Stripe handles them.</p>
+          <p className="text-[11px] text-muted-foreground flex items-center gap-1.5"><ShieldCheck size={12} className="text-emerald-500" /> Card details never touch our servers — Razorpay handles them.</p>
           <p className="text-xs text-muted-foreground">Already have an account? <a href="/login" className="underline">Sign in</a></p>
         </form>
       </div>

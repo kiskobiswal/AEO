@@ -1,37 +1,44 @@
-"""Subscription flow — plan-based access control + Stripe one-off payments
-that grant 30 days of access each. On successful payment the user's
-`plan_expires_at` is extended by 30 days (webhook or status poll — whichever
-lands first, both are idempotent). Failures leave the user in
-`status="pending_payment"`. Cancellations are handled by simply letting the
-current window expire.
+"""Subscription flow — plan-based access control + Razorpay one-off payments
+that grant 30 days of access each. On a successful payment the user's
+`plan_expires_at` is extended by 30 days (via the /verify endpoint invoked
+from the frontend right after Razorpay confirms payment — idempotent).
 
-Why not Stripe recurring subscriptions? The shared sandbox key ships with the
-pod (`sk_test_emergent`) only supports `mode="payment"` via the emergent
-integration library — subscription-mode checkout requires a claimable sandbox,
-which is not available for the current account country. Everything else in
-the spec (activation, extension, feature/project limits, upgrade lock UI)
-works exactly the same either way.
+Razorpay is used in "one-time order" mode (Orders API + Checkout.js modal).
+The Order ID doubles as our internal `session_id` so the rest of the
+frontend (PaymentSuccess polling, payment_transactions collection etc.)
+does not need to change.
 """
 from __future__ import annotations
 
 import os
+import hmac
+import json
+import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
+import razorpay
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
-
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout, CheckoutSessionRequest, CheckoutSessionResponse,
-    CheckoutStatusResponse,
-)
 
 logger = logging.getLogger(__name__)
 
-STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "sk_test_emergent")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET") or None  # optional
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "") or None
+# Currency + FX. Plans are priced in USD; if the merchant account is INR-only
+# (default for Razorpay India), set RAZORPAY_CURRENCY=INR and optionally
+# RAZORPAY_USD_TO_INR to pick the FX conversion (defaults to 1 → treat prices
+# as face-value INR). International cards can use USD when enabled on the
+# Razorpay dashboard.
+RAZORPAY_CURRENCY = (os.environ.get("RAZORPAY_CURRENCY") or "INR").upper()
+try:
+    _fx = float(os.environ.get("RAZORPAY_USD_TO_INR") or "1")
+except Exception:
+    _fx = 1.0
+RAZORPAY_USD_TO_INR = _fx
 
 # ---------- Plan catalogue (server-side; frontend fetches via /plans) ----------
 FEATURE_DOMAIN = "domain"
@@ -98,7 +105,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
 ACCESS_GRANT_DAYS = 30
 
 subs_router = APIRouter(prefix="/api/subscriptions")
-stripe_webhook_router = APIRouter()  # mounted at /api
+razorpay_webhook_router = APIRouter()  # mounted at /api
 
 
 # ---------- helpers ----------
@@ -195,51 +202,68 @@ async def _server_get_current_user(request: Request):
     return await _server().get_current_user(request)
 
 
-# ---------- Stripe helpers ----------
-def _stripe_client(webhook_url: Optional[str]) -> StripeCheckout:
-    return StripeCheckout(api_key=STRIPE_API_KEY, webhook_secret=STRIPE_WEBHOOK_SECRET, webhook_url=webhook_url)
+# ---------- Razorpay helpers ----------
+def _razorpay_client() -> razorpay.Client:
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=500, detail="Razorpay is not configured on the server.")
+    return razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 
-def _webhook_url(request: Request) -> str:
-    # Public webhook path (see mount at /api/webhook/stripe)
-    base = str(request.base_url).rstrip("/")
-    return f"{base}/api/webhook/stripe"
+def _amount_in_smallest_unit(price_usd: float) -> int:
+    """Razorpay wants the amount in the smallest currency unit (paise/cents)."""
+    if RAZORPAY_CURRENCY == "INR":
+        return int(round(price_usd * RAZORPAY_USD_TO_INR * 100))
+    return int(round(price_usd * 100))
 
 
-def _origin(request: Request, override: Optional[str]) -> str:
-    return (override or request.headers.get("origin") or str(request.base_url)).rstrip("/")
-
-
-async def _create_checkout(user_id: str, plan_slug: str, purpose: str, origin: str, request: Request) -> dict:
+async def _create_order(user_id: str, plan_slug: str, purpose: str) -> dict:
     plan = PLANS[plan_slug]
-    sc = _stripe_client(_webhook_url(request))
-    req = CheckoutSessionRequest(
-        amount=plan["price_usd"], currency="usd",
-        success_url=f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{origin}/payment/cancel?plan={plan_slug}",
-        metadata={"user_id": user_id, "plan": plan_slug, "purpose": purpose},
-    )
-    res: CheckoutSessionResponse = await sc.create_checkout_session(req)
+    client = _razorpay_client()
+    amount_minor = _amount_in_smallest_unit(plan["price_usd"])
+    try:
+        order = client.order.create({
+            "amount": amount_minor,
+            "currency": RAZORPAY_CURRENCY,
+            "receipt": f"cite_{plan_slug}_{user_id[-10:]}_{int(_now().timestamp())}",
+            "payment_capture": 1,
+            "notes": {"user_id": user_id, "plan": plan_slug, "purpose": purpose},
+        })
+    except Exception as e:
+        logger.error(f"[razorpay] order create failed: {e}")
+        raise HTTPException(status_code=502, detail="Could not start Razorpay checkout — please try again.")
+
+    order_id = order["id"]
     tx = {
-        "session_id": res.session_id,
+        "session_id": order_id,     # keep the same field name for compatibility
+        "order_id": order_id,
         "user_id": user_id,
         "plan": plan_slug,
         "amount": plan["price_usd"],
-        "currency": "usd",
-        "purpose": purpose,  # register | upgrade | renew
+        "amount_minor": amount_minor,
+        "currency": RAZORPAY_CURRENCY,
+        "purpose": purpose,           # register | upgrade | renew
         "status": "initiated",
         "payment_status": "pending",
+        "provider": "razorpay",
         "created_at": _now(),
         "updated_at": _now(),
     }
     await _server().db.payment_transactions.insert_one(tx)
-    return {"checkout_url": res.url, "session_id": res.session_id}
+    return {
+        "provider": "razorpay",
+        "order_id": order_id,
+        "session_id": order_id,
+        "key_id": RAZORPAY_KEY_ID,
+        "amount": amount_minor,
+        "currency": RAZORPAY_CURRENCY,
+        "plan": plan_slug,
+    }
 
 
 async def _grant_access(user_id: str, plan_slug: str, purpose: str):
-    """Idempotent activation/extension. Called from webhook AND status poll —
-    whichever wins first extends by 30 days; further calls for the same session
-    are no-ops thanks to the transaction guard in the caller."""
+    """Idempotent activation/extension. Called from webhook AND verify —
+    whichever wins first extends by 30 days; further calls for the same
+    order are no-ops thanks to the transaction guard in the caller."""
     plan = PLANS.get(plan_slug)
     if not plan:
         logger.warning(f"grant_access: unknown plan '{plan_slug}'")
@@ -250,7 +274,6 @@ async def _grant_access(user_id: str, plan_slug: str, purpose: str):
         return
     now = _now()
     current_exp = _parse_dt(user.get("plan_expires_at"))
-    # If active on same plan → EXTEND. Otherwise → start a fresh 30-day window.
     if user.get("plan") == plan_slug and current_exp and current_exp > now:
         new_exp = current_exp + timedelta(days=ACCESS_GRANT_DAYS)
     else:
@@ -273,19 +296,11 @@ async def _mark_failed(user_id: str):
         return
     count = int(user.get("failed_payment_count", 0)) + 1
     updates = {"failed_payment_count": count, "last_payment_failed_at": _to_iso(_now())}
-    # 3 strikes: lock access (no grace)
     if count >= 3:
         updates["subscription_status"] = "past_due_locked"
         updates["plan_expires_at"] = _to_iso(_now() - timedelta(seconds=1))
     await users.update_one({"_id": ObjectId(user_id)}, {"$set": updates})
     logger.warning(f"[subscriptions] payment failed x{count} user={user_id}")
-
-
-async def _cancel_at_period_end(user_id: str):
-    """Subscription cancelled — keep access until plan_expires_at, then let it lapse."""
-    await _server().db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {
-        "subscription_status": "cancel_at_period_end",
-    }})
 
 
 # ---------- Models ----------
@@ -302,19 +317,37 @@ class UpgradeInput(BaseModel):
     origin_url: Optional[str] = None
 
 
+class VerifyInput(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
 # ---------- Endpoints ----------
 @subs_router.get("/plans")
 async def list_plans():
     return {"plans": list(PLANS.values()), "access_grant_days": ACCESS_GRANT_DAYS}
 
 
+@subs_router.get("/config")
+async def public_config():
+    """Public config used by the frontend to bootstrap Razorpay checkout."""
+    return {
+        "provider": "razorpay",
+        "key_id": RAZORPAY_KEY_ID,
+        "currency": RAZORPAY_CURRENCY,
+        "usd_to_inr": RAZORPAY_USD_TO_INR,
+    }
+
+
 @subs_router.post("/register-and-checkout")
 async def register_and_checkout(body: RegisterAndCheckoutInput, request: Request):
-    """Create the user record (status=pending_payment) and start Stripe checkout.
+    """Create the user record (status=pending_payment) and start a Razorpay
+    Order. Returns everything the frontend needs to open the Razorpay
+    Checkout modal.
 
     If the email already exists AND is pending_payment, we allow retrying the
-    checkout instead of returning an error — accounts stuck in 'pending' can
-    click 'complete your payment' from the login page and end up here again.
+    checkout instead of returning an error.
     """
     srv = _server()
     if body.plan not in PLANS:
@@ -324,7 +357,7 @@ async def register_and_checkout(body: RegisterAndCheckoutInput, request: Request
     if existing:
         if existing.get("subscription_status") in ("pending_payment", None) and not existing.get("plan_expires_at"):
             uid = str(existing["_id"])
-            await srv.db.users.update_one({"_id": existing["_id"]}, {"$set": {"plan": body.plan}})
+            await srv.db.users.update_one({"_id": existing["_id"]}, {"$set": {"plan": body.plan, "name": body.name.strip()}})
         else:
             raise HTTPException(status_code=400, detail="Email already registered — sign in instead")
     else:
@@ -339,52 +372,76 @@ async def register_and_checkout(body: RegisterAndCheckoutInput, request: Request
         }
         res = await srv.db.users.insert_one(doc)
         uid = str(res.inserted_id)
-    origin = _origin(request, body.origin_url)
-    checkout = await _create_checkout(uid, body.plan, "register", origin, request)
-    return {"user_id": uid, "email": email, **checkout}
+    order = await _create_order(uid, body.plan, "register")
+    return {"user_id": uid, "email": email, "name": body.name.strip(), **order}
 
 
 @subs_router.post("/upgrade")
 async def upgrade(body: UpgradeInput, request: Request, user: dict = Depends(_server_get_current_user)):
     """Upgrade / renew: authenticated user picks a plan and gets a fresh
-    checkout session. On success their access window is extended by 30 days.
-    Admin accounts bypass Stripe entirely."""
+    Razorpay order. On success their access window is extended by 30 days.
+    Admin accounts bypass Razorpay entirely."""
     if body.plan not in PLANS:
         raise HTTPException(status_code=400, detail="Unknown plan")
     if user.get("role") == "admin":
         raise HTTPException(status_code=400, detail="Admin accounts already have full access")
-    origin = _origin(request, body.origin_url)
-    return await _create_checkout(user["id"], body.plan, "upgrade", origin, request)
+    order = await _create_order(user["id"], body.plan, "upgrade")
+    return {"user_id": user["id"], "email": user.get("email"), "name": user.get("name"), **order}
+
+
+@subs_router.post("/verify")
+async def verify_payment(body: VerifyInput):
+    """Called by the frontend right after the Razorpay Checkout modal closes
+    with a successful payment. Verifies the HMAC-SHA256 signature, then
+    idempotently marks the transaction paid and grants access."""
+    srv = _server()
+    if not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=500, detail="Razorpay is not configured on the server.")
+
+    tx = await srv.db.payment_transactions.find_one({"session_id": body.razorpay_order_id})
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    # Signature = HMAC_SHA256(order_id + "|" + payment_id, key_secret)
+    expected = hmac.new(
+        RAZORPAY_KEY_SECRET.encode("utf-8"),
+        f"{body.razorpay_order_id}|{body.razorpay_payment_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, body.razorpay_signature):
+        logger.warning(f"[razorpay] signature mismatch for order {body.razorpay_order_id}")
+        await srv.db.payment_transactions.update_one(
+            {"session_id": body.razorpay_order_id},
+            {"$set": {"status": "failed", "payment_status": "failed", "updated_at": _now(),
+                       "last_error": "signature_mismatch"}},
+        )
+        if tx.get("user_id"):
+            await _mark_failed(tx["user_id"])
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+
+    # Idempotent flip
+    res = await srv.db.payment_transactions.update_one(
+        {"session_id": body.razorpay_order_id, "payment_status": {"$ne": "paid"}},
+        {"$set": {"status": "completed", "payment_status": "paid",
+                   "payment_id": body.razorpay_payment_id,
+                   "signature": body.razorpay_signature,
+                   "updated_at": _now()}},
+    )
+    if res.modified_count and tx.get("user_id") and tx.get("plan"):
+        await _grant_access(tx["user_id"], tx["plan"], tx.get("purpose", "register"))
+    return {"ok": True, "payment_status": "paid", "plan": tx.get("plan")}
 
 
 @subs_router.get("/status/{session_id}")
-async def status(session_id: str, request: Request):
-    """Polled by /payment/success. Unauthenticated by design (matches playbook)."""
+async def status(session_id: str):
+    """Polled by /payment/success. Unauthenticated by design so we can show
+    the payment result even after a fresh browser session. For Razorpay the
+    /verify endpoint has already flipped the DB flag, so this is just a
+    lookup — no external call needed."""
     srv = _server()
     tx = await srv.db.payment_transactions.find_one({"session_id": session_id})
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
-
-    if tx.get("payment_status") != "paid":
-        try:
-            sc = _stripe_client(_webhook_url(request))
-            info: CheckoutStatusResponse = await sc.get_checkout_status(session_id)
-            if info.payment_status == "paid" or info.status == "complete":
-                # idempotent flip
-                res = await srv.db.payment_transactions.update_one(
-                    {"session_id": session_id, "payment_status": {"$ne": "paid"}},
-                    {"$set": {"status": "completed", "payment_status": "paid", "updated_at": _now()}},
-                )
-                if res.modified_count:
-                    await _grant_access(tx["user_id"], tx["plan"], tx.get("purpose", "register"))
-                tx = await srv.db.payment_transactions.find_one({"session_id": session_id})
-            elif info.status in ("expired",):
-                await srv.db.payment_transactions.update_one({"session_id": session_id},
-                    {"$set": {"status": "expired", "payment_status": "expired", "updated_at": _now()}})
-                tx = await srv.db.payment_transactions.find_one({"session_id": session_id})
-        except Exception as e:
-            logger.warning(f"[subscriptions] stripe status poll failed for {session_id}: {e}")
-
     return {
         "session_id": tx["session_id"],
         "status": tx["status"],
@@ -393,52 +450,51 @@ async def status(session_id: str, request: Request):
     }
 
 
-@stripe_webhook_router.post("/webhook/stripe")
-async def stripe_webhook(request: Request):
-    """Idempotent webhook handler. Handles:
-      - checkout.session.completed / async_payment_succeeded → activate/extend
-      - checkout.session.async_payment_failed / expired → mark failure
-      - customer.subscription.deleted → cancel at period end
-    The `emergentintegrations` library normalises signature verification when
-    STRIPE_WEBHOOK_SECRET is set."""
+@razorpay_webhook_router.post("/webhook/razorpay")
+async def razorpay_webhook(request: Request):
+    """Optional webhook — belt & braces in case the frontend /verify call
+    never lands (user closes the tab, network hiccup etc.). Idempotent."""
     srv = _server()
     payload = await request.body()
-    sig = request.headers.get("stripe-signature") or request.headers.get("Stripe-Signature")
+    sig = request.headers.get("x-razorpay-signature") or request.headers.get("X-Razorpay-Signature")
+
+    if RAZORPAY_WEBHOOK_SECRET:
+        expected = hmac.new(RAZORPAY_WEBHOOK_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        if not sig or not hmac.compare_digest(expected, sig):
+            logger.warning("[razorpay-webhook] signature mismatch — rejecting")
+            raise HTTPException(status_code=400, detail="Invalid signature")
+
     try:
-        sc = _stripe_client(_webhook_url(request))
-        evt = await sc.handle_webhook(payload, sig)
-    except Exception as e:
-        logger.warning(f"[stripe-webhook] verification failed: {e}")
-        raise HTTPException(status_code=400, detail="Invalid webhook payload")
+        evt = json.loads(payload.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid payload")
 
-    et = evt.event_type
-    sid = evt.session_id
-    meta = evt.metadata or {}
-    user_id = meta.get("user_id")
-    plan = meta.get("plan")
-    purpose = meta.get("purpose", "register")
+    et = evt.get("event") or ""
+    entity = ((evt.get("payload") or {}).get("payment") or {}).get("entity") or {}
+    order_id = entity.get("order_id")
+    payment_id = entity.get("id")
+    logger.info(f"[razorpay-webhook] type={et} order={order_id} payment={payment_id}")
 
-    logger.info(f"[stripe-webhook] type={et} session={sid} user={user_id} plan={plan}")
+    if not order_id:
+        return {"ok": True}
 
-    if et in ("checkout.session.completed", "checkout.session.async_payment_succeeded", "payment_intent.succeeded"):
-        if sid:
-            res = await srv.db.payment_transactions.update_one(
-                {"session_id": sid, "payment_status": {"$ne": "paid"}},
-                {"$set": {"status": "completed", "payment_status": "paid", "updated_at": _now()}},
-            )
-            if res.modified_count and user_id and plan:
-                await _grant_access(user_id, plan, purpose)
-    elif et in ("checkout.session.async_payment_failed", "payment_intent.payment_failed"):
-        if sid:
-            await srv.db.payment_transactions.update_one({"session_id": sid},
-                {"$set": {"status": "failed", "payment_status": "failed", "updated_at": _now()}})
-        if user_id:
-            await _mark_failed(user_id)
-    elif et == "checkout.session.expired":
-        if sid:
-            await srv.db.payment_transactions.update_one({"session_id": sid},
-                {"$set": {"status": "expired", "payment_status": "expired", "updated_at": _now()}})
-    elif et == "customer.subscription.deleted":
-        if user_id:
-            await _cancel_at_period_end(user_id)
+    tx = await srv.db.payment_transactions.find_one({"session_id": order_id})
+    if not tx:
+        return {"ok": True}
+
+    if et in ("payment.captured", "order.paid"):
+        res = await srv.db.payment_transactions.update_one(
+            {"session_id": order_id, "payment_status": {"$ne": "paid"}},
+            {"$set": {"status": "completed", "payment_status": "paid",
+                       "payment_id": payment_id, "updated_at": _now()}},
+        )
+        if res.modified_count and tx.get("user_id") and tx.get("plan"):
+            await _grant_access(tx["user_id"], tx["plan"], tx.get("purpose", "register"))
+    elif et in ("payment.failed",):
+        await srv.db.payment_transactions.update_one(
+            {"session_id": order_id},
+            {"$set": {"status": "failed", "payment_status": "failed", "updated_at": _now()}},
+        )
+        if tx.get("user_id"):
+            await _mark_failed(tx["user_id"])
     return {"ok": True}

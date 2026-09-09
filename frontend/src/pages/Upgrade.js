@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { http, formatApiErrorDetail } from "@/lib/api";
+import { openRazorpayCheckout } from "@/lib/razorpay";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -10,9 +11,9 @@ import { PageHeader } from "@/components/ui-bits";
 import { toast } from "sonner";
 
 /*
- * In-app upgrade / renew page. Sends the signed-in user to a fresh Stripe
- * checkout for the picked plan. On return their access window is extended
- * by 30 days (webhook or /status poll — whichever wins).
+ * In-app upgrade / renew page. Opens a Razorpay Checkout modal for the
+ * picked plan. On success the backend extends the user's access window
+ * by 30 days (verify endpoint or webhook — whichever wins first).
  */
 
 export default function Upgrade() {
@@ -33,8 +34,23 @@ export default function Upgrade() {
       const { data } = await http.post("/subscriptions/upgrade", {
         plan: slug, origin_url: window.location.origin,
       });
-      try { sessionStorage.setItem("citetail:last_session_id", data.session_id); } catch { /* ignore */ }
-      window.location.href = data.checkout_url;
+      try { sessionStorage.setItem("citetail:last_session_id", data.session_id || data.order_id); } catch { /* ignore */ }
+      const planMeta = plans.find((p) => p.slug === slug);
+      await openRazorpayCheckout(data, {
+        planName: planMeta?.name,
+        prefill: { name: user?.name || data.name || "", email: user?.email || data.email || "" },
+        onSuccess: (orderId) => {
+          window.location.href = `/payment/success?session_id=${encodeURIComponent(orderId)}`;
+        },
+        onFailure: (reason) => {
+          setLoading(null);
+          if (reason === "cancelled") {
+            toast.message("Checkout closed");
+          } else {
+            toast.error(reason || "Payment failed");
+          }
+        },
+      });
     } catch (e) {
       toast.error(formatApiErrorDetail(e.response?.data?.detail) || "Could not start checkout");
       setLoading(null);

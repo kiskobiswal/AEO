@@ -3331,10 +3331,10 @@ app.include_router(_site_agent.site_agent_router)
 from admin_auth import admin_router as _admin_router  # noqa: E402
 app.include_router(_admin_router)
 
-# Subscription + Stripe checkout endpoints
-from subscriptions import subs_router as _subs_router, stripe_webhook_router as _stripe_webhook_router  # noqa: E402
+# Subscription + Razorpay checkout endpoints
+from subscriptions import subs_router as _subs_router, razorpay_webhook_router as _razorpay_webhook_router  # noqa: E402
 app.include_router(_subs_router)
-app.include_router(_stripe_webhook_router, prefix="/api")
+app.include_router(_razorpay_webhook_router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,

@@ -9,7 +9,7 @@ import { Check, Sparkles, ArrowRight, ShieldCheck } from "lucide-react";
 /*
  * Public pricing page — landing entry point. Clicking a plan sends the user
  * to /signup?plan=<slug>, which creates a pending-payment account and hands
- * off to Stripe checkout.
+ * off to Razorpay checkout.
  */
 
 export default function Pricing() {
@@ -83,7 +83,7 @@ export default function Pricing() {
 
       <footer className="border-t border-slate-100 py-8 text-center text-xs text-muted-foreground">
         <div className="flex items-center justify-center gap-2">
-          <ShieldCheck size={14} className="text-emerald-500" /> Secure checkout by Stripe · test cards enabled
+          <ShieldCheck size={14} className="text-emerald-500" /> Secure checkout by Razorpay · UPI, cards & netbanking
         </div>
       </footer>
     </div>
