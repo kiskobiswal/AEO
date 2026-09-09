@@ -3,7 +3,7 @@
 import requests
 import time
 
-BACKEND_URL = "https://34635123-f47c-4df6-a694-3e011d93b96e.preview.emergentagent.com/api"
+BACKEND_URL = "https://emergent-import-13.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@citetail.com"
 ADMIN_PASSWORD = "admin123"
 

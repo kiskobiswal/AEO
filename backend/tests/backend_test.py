@@ -11,7 +11,7 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ['REACT_APP_BACKEND_URL'].rstrip('/') if 'REACT_APP_BACKEND_URL' in os.environ else 'https://no-error-deploy.preview.emergentagent.com'
+BASE_URL = os.environ['REACT_APP_BACKEND_URL'].rstrip('/') if 'REACT_APP_BACKEND_URL' in os.environ else 'https://emergent-import-13.preview.emergentagent.com'
 API = f"{BASE_URL}/api"
 
 TEST_EMAIL = f"tester1@geo.com"
