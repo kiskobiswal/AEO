@@ -2928,7 +2928,311 @@ async def delete_project(project_id: str, user: dict = Depends(get_current_user)
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------
+# Site Agent — Connect Website (authenticated user endpoints).
+# ---------------------------------------------------------------------
+# Users create a "site connection" from their profile, paste the returned
+# <script> into their website's <head>, and once the script pings home
+# the domain is auto-detected & verified. From that point, "Fix" buttons
+# inside the project report can generate a suggested change (Claude) and
+# queue it as a patch that the injected script picks up on the next poll.
+from site_agent import (  # noqa: E402
+    normalize_domain as _normalize_site_domain,
+    new_script_id as _new_script_id,
+    make_script_tag as _make_script_tag,
+)
+
+
+def _public_api_base() -> str:
+    base = os.environ.get("APP_URL") or os.environ.get("PUBLIC_BACKEND_URL") or ""
+    return base.rstrip("/")
+
+
+def _site_conn_view(doc: dict, api_base: Optional[str] = None) -> dict:
+    api_base = api_base or _public_api_base()
+    return {
+        "id": doc["id"],
+        "script_id": doc["script_id"],
+        "domain": doc.get("domain"),
+        "verified": bool(doc.get("verified")),
+        "verified_at": doc.get("verified_at"),
+        "created_at": doc.get("created_at"),
+        "last_ping_at": doc.get("last_ping_at"),
+        "current_title": doc.get("current_title"),
+        "current_description": doc.get("current_description"),
+        "script_tag": _make_script_tag(api_base, doc["script_id"]) if api_base else None,
+    }
+
+
+@api_router.get("/site-connections")
+async def list_site_connections(request: Request, user: dict = Depends(get_current_user)):
+    docs = await db.site_connections.find({"user_id": user["id"]}, {"_id": 0}).to_list(50)
+    api_base = _public_api_base() or f"{request.url.scheme}://{request.url.netloc}"
+    return {"connections": [_site_conn_view(d, api_base) for d in docs]}
+
+
+class CreateSiteConnectionBody(BaseModel):
+    domain: Optional[str] = None  # optional hint the user's about to install on this domain
+
+
+@api_router.post("/site-connections")
+async def create_site_connection(body: CreateSiteConnectionBody, request: Request,
+                                 user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": secrets.token_urlsafe(12),
+        "user_id": user["id"],
+        "script_id": _new_script_id(),
+        "domain": _normalize_site_domain(body.domain) if body.domain else None,
+        "verified": False,
+        "verified_at": None,
+        "created_at": now,
+        "last_ping_at": None,
+    }
+    await db.site_connections.insert_one(doc)
+    api_base = _public_api_base() or f"{request.url.scheme}://{request.url.netloc}"
+    return _site_conn_view(doc, api_base)
+
+
+@api_router.delete("/site-connections/{conn_id}")
+async def delete_site_connection(conn_id: str, user: dict = Depends(get_current_user)):
+    doc = await db.site_connections.find_one({"id": conn_id, "user_id": user["id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    await db.site_connections.delete_one({"_id": doc["_id"]})
+    # Drop any pending patches for this script so the customer's site stops seeing them.
+    await db.site_patches.delete_many({"script_id": doc["script_id"], "status": "pending"})
+    return {"ok": True}
+
+
+# ---------- Fix generate / apply ---------------------------------------
+
+_FIX_SYSTEM = (
+    "You are a senior SEO + GEO/AEO copywriter. Given a page URL, brand, and a specific "
+    "issue found on the page, return the single BEST fix in strict minified JSON. "
+    "Keep it grounded in the URL / brand context — no invented facts. "
+    "Never wrap the response in markdown; output ONLY the JSON object."
+)
+
+
+def _fix_prompt(issue: dict, project: dict, page: Optional[dict]) -> str:
+    brand = (project.get("brand") or {}).get("name") or project.get("domain") or ""
+    services = (project.get("brand") or {}).get("services") or []
+    page_url = (page or {}).get("url") or f"https://{project.get('domain')}/"
+    current_title = (page or {}).get("title") or ""
+    current_desc = (page or {}).get("meta_description") or ""
+    body_excerpt = ((page or {}).get("text") or "")[:1500]
+    return f"""BRAND: {brand}
+DOMAIN: {project.get('domain')}
+SERVICES: {', '.join(services[:6])}
+PAGE URL: {page_url}
+CURRENT <title>: {current_title!r}
+CURRENT <meta description>: {current_desc!r}
+PAGE EXCERPT: {body_excerpt!r}
+
+ISSUE:
+- code: {issue.get('code')}
+- category: {issue.get('category')}
+- message: {issue.get('message')}
+- current fix suggestion: {issue.get('fix')}
+
+Return JSON in this exact shape (pick ONE patch_type that best resolves the issue):
+{{
+  "patch_type": "meta_title" | "meta_description" | "content_block",
+  "value": "<the new <title> text — required if patch_type=meta_title>",
+  "description": "<the new meta description — required if patch_type=meta_description>",
+  "html": "<a small self-contained HTML block, ~80-160 words, no <script>/<style>, required if patch_type=content_block>",
+  "rationale": "<1-2 sentence explanation of why this fixes the issue, plain English>"
+}}
+Rules:
+- meta_title values: 50-60 chars, brand + primary intent + differentiator.
+- meta_description values: 140-160 chars, natural sentence, CTA-friendly.
+- content_block html: valid HTML with a heading + 2-3 short paragraphs or FAQ; must be safe (no scripts, no external images)."""
+
+
+# Map issue codes → allowed patch types (fixable via injected script).
+_FIXABLE_CODES = {
+    "missing_title": "meta_title",
+    "short_title": "meta_title",
+    "long_title": "meta_title",
+    "missing_meta_description": "meta_description",
+    "thin_content": "content_block",
+    "no_answer_paragraph": "content_block",
+    "no_citation_statistics": "content_block",
+    "no_faq_schema": "content_block",
+}
+
+
+def _fixable(code: str) -> Optional[str]:
+    return _FIXABLE_CODES.get(code)
+
+
+class GenerateFixBody(BaseModel):
+    issue_code: str
+    page_url: Optional[str] = None  # target page from project.pages; None → homepage
+    issue_message: Optional[str] = None
+    issue_fix: Optional[str] = None
+    issue_category: Optional[str] = None
+
+
+@api_router.post("/projects/{project_id}/fixes/generate")
+async def generate_project_fix(project_id: str, body: GenerateFixBody,
+                               user: dict = Depends(get_current_user)):
+    """One small Claude call → returns the suggested content to review."""
+    project = await db.projects.find_one({"id": project_id, "user_id": user["id"]}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    patch_type = _fixable(body.issue_code)
+    if not patch_type:
+        raise HTTPException(status_code=400,
+                            detail="This issue can't be auto-fixed via the injected script.")
+
+    # Enforce the "connected website must match project domain" rule up-front so
+    # we don't burn an LLM call for a user who hasn't installed the script.
+    proj_domain = _normalize_site_domain(project.get("domain") or "")
+    conn = await db.site_connections.find_one({
+        "user_id": user["id"], "domain": proj_domain, "verified": True,
+    })
+    if not conn:
+        return {
+            "needs_connection": True,
+            "project_domain": proj_domain,
+            "message": "Connect your website first so Citetail can apply the fix live.",
+        }
+
+    # Look up the target page in project_pages (best effort).
+    page = None
+    if body.page_url:
+        page = await db.project_pages.find_one(
+            {"project_id": project_id, "url": body.page_url}, {"_id": 0})
+
+    issue = {
+        "code": body.issue_code,
+        "message": body.issue_message or "",
+        "fix": body.issue_fix or "",
+        "category": body.issue_category or "",
+    }
+
+    try:
+        raw = await llm_json(_FIX_SYSTEM, _fix_prompt(issue, project, page),
+                             session=f"fix-{project_id}-{secrets.token_hex(3)}",
+                             max_tokens=700)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("fix generation failed")
+        raise HTTPException(status_code=500, detail=f"Fix generation failed: {e}")
+
+    # Sanity: keep only whitelisted fields.
+    suggestion = {
+        "patch_type": raw.get("patch_type") or patch_type,
+        "value": (raw.get("value") or "").strip()[:200] if patch_type == "meta_title" else None,
+        "description": (raw.get("description") or "").strip()[:400] if patch_type == "meta_description" else None,
+        "html": (raw.get("html") or "").strip()[:4000] if patch_type == "content_block" else None,
+        "rationale": (raw.get("rationale") or "").strip()[:400],
+    }
+    # Fallback: if the LLM chose an unsupported patch_type, coerce back to our map.
+    if suggestion["patch_type"] not in _FIXABLE_CODES.values():
+        suggestion["patch_type"] = patch_type
+
+    return {
+        "needs_connection": False,
+        "connection_id": conn.get("id"),
+        "script_id": conn.get("script_id"),
+        "patch_type": suggestion["patch_type"],
+        "suggestion": suggestion,
+        "page_url": body.page_url,
+    }
+
+
+class ApplyFixBody(BaseModel):
+    issue_code: str
+    patch_type: str
+    payload: dict          # {value?, description?, html?}
+    page_url: Optional[str] = None
+    rationale: Optional[str] = None
+
+
+@api_router.post("/projects/{project_id}/fixes/apply")
+async def apply_project_fix(project_id: str, body: ApplyFixBody,
+                            user: dict = Depends(get_current_user)):
+    """Queue an approved patch for the connected site to pick up on next poll."""
+    project = await db.projects.find_one({"id": project_id, "user_id": user["id"]}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if body.patch_type not in ("meta_title", "meta_description", "content_block"):
+        raise HTTPException(status_code=400, detail="Unsupported patch_type")
+
+    proj_domain = _normalize_site_domain(project.get("domain") or "")
+    conn = await db.site_connections.find_one({
+        "user_id": user["id"], "domain": proj_domain, "verified": True,
+    })
+    if not conn:
+        raise HTTPException(status_code=409,
+                            detail="Website not connected for this project's domain.")
+
+    # Normalise payload so the injected script has a stable shape.
+    payload = {}
+    if body.patch_type == "meta_title":
+        v = (body.payload.get("value") or "").strip()
+        if not v:
+            raise HTTPException(status_code=400, detail="Missing value for meta_title")
+        payload["value"] = v[:200]
+    elif body.patch_type == "meta_description":
+        v = (body.payload.get("value") or body.payload.get("description") or "").strip()
+        if not v:
+            raise HTTPException(status_code=400, detail="Missing value for meta_description")
+        payload["value"] = v[:400]
+    else:  # content_block
+        html = (body.payload.get("html") or "").strip()
+        if not html:
+            raise HTTPException(status_code=400, detail="Missing html for content_block")
+        # Very light safety: strip <script> / <style> tags.
+        html = re.sub(r"<\s*(script|style)[^>]*>.*?<\s*/\s*\1\s*>", "", html, flags=re.I | re.S)
+        payload["html"] = html[:4000]
+
+    now = datetime.now(timezone.utc).isoformat()
+    patch = {
+        "id": secrets.token_urlsafe(10),
+        "user_id": user["id"],
+        "project_id": project_id,
+        "script_id": conn["script_id"],
+        "issue_code": body.issue_code,
+        "patch_type": body.patch_type,
+        "payload": payload,
+        "page_url": (body.page_url or "").strip() or None,
+        "rationale": (body.rationale or "").strip()[:400] or None,
+        "status": "pending",
+        "created_at": now,
+        "applied_at": None,
+    }
+    await db.site_patches.insert_one(patch)
+    return {
+        "ok": True,
+        "patch_id": patch["id"],
+        "status": "pending",
+        "domain": conn.get("domain"),
+        "message": "Fix queued — your site will apply it on its next check (within ~20s).",
+    }
+
+
+@api_router.get("/projects/{project_id}/fixes")
+async def list_project_fixes(project_id: str, user: dict = Depends(get_current_user)):
+    project = await db.projects.find_one({"id": project_id, "user_id": user["id"]}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    docs = await db.site_patches.find(
+        {"project_id": project_id, "user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    return {"patches": docs}
+
+
 app.include_router(api_router)
+
+# Site Agent — Connect Website script pipeline (public CORS-open endpoints).
+import site_agent as _site_agent  # noqa: E402
+_site_agent.bind_db(db)
+app.include_router(_site_agent.site_agent_router)
 
 # Admin OTP auth flow (registration + login + password reset).
 # Kept in a separate router so the admin URLs don't collide with the
@@ -2968,6 +3272,14 @@ async def startup():
         }})
     # Ensure TTL index for admin OTPs
     await db.admin_otps.create_index("expires_at", expireAfterSeconds=0)
+    # Site-agent lookups by script_id must be fast (called on every page-load ping).
+    try:
+        await db.site_connections.create_index("script_id", unique=True)
+        await db.site_connections.create_index([("user_id", 1), ("domain", 1)])
+        await db.site_patches.create_index([("script_id", 1), ("status", 1)])
+        await db.site_patches.create_index([("project_id", 1), ("created_at", -1)])
+    except Exception:
+        logger.exception("site-agent index creation failed (non-fatal)")
     logger.info("Startup complete")
 
 

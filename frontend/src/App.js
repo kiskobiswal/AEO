@@ -23,6 +23,7 @@ import AnalysisDetail from "@/pages/AnalysisDetail";
 import History from "@/pages/History";
 import Projects from "@/pages/Projects";
 import ProjectDetail from "@/pages/ProjectDetail";
+import Profile from "@/pages/Profile";
 import { Toaster } from "@/components/ui/sonner";
 import { Loader2 } from "lucide-react";
 
@@ -80,6 +81,7 @@ function App() {
             <Route path="/app/history" element={<Protected><History /></Protected>} />
             <Route path="/app/analysis/:id" element={<Protected><AnalysisDetail /></Protected>} />
             <Route path="/app/upgrade" element={<Protected allowInactive><Upgrade /></Protected>} />
+            <Route path="/app/profile" element={<Protected allowInactive><Profile /></Protected>} />
             <Route path="*" element={<Navigate to="/app" replace />} />
           </Routes>
         </BrowserRouter>

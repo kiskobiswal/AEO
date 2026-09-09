@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ScoreGauge, scoreColor } from "@/components/ScoreGauge";
 import { PageHeader, EmptyState } from "@/components/ui-bits";
+import { FixButton, FIXABLE_ISSUE_CODES } from "@/components/FixModal";
 import {
   Loader2, RefreshCcw, ArrowLeft, ExternalLink, CheckCircle2, XCircle,
   AlertTriangle, Link2, Activity, FileText, Globe, ChevronDown, ChevronRight,
@@ -282,9 +283,17 @@ export default function ProjectDetail() {
                           <div className="space-y-2">
                             {p.issues.map((iss, k) => (
                               <div key={k} className={`text-xs px-3 py-2 rounded-md border ${severityColor[iss.severity]}`} data-testid={`issue-${iss.code}`}>
-                                <div className="font-medium">
-                                  <span className="font-bold mr-1">[{categoryLabel[iss.category] || iss.category}]</span>
-                                  {iss.message}
+                                <div className="font-medium flex items-start justify-between gap-2 flex-wrap">
+                                  <div className="flex-1 min-w-0">
+                                    <span className="font-bold mr-1">[{categoryLabel[iss.category] || iss.category}]</span>
+                                    {iss.message}
+                                  </div>
+                                  <FixButton
+                                    issue={iss}
+                                    projectId={id}
+                                    pageUrl={p.url}
+                                    onApplied={() => toast.success("Fix queued live")}
+                                  />
                                 </div>
                                 {iss.fix ? (
                                   <div className="mt-1 flex items-start gap-1 text-[11px] text-foreground/80">

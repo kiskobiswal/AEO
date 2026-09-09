@@ -105,6 +105,18 @@
 user_problem_statement: "User reports 502/timeout errors on Domain Analysis, Brand Consistency, PR Coverage, Content Optimizer. Fix with minimal credit spend (do not use AI testing agent for expensive full-scans)."
 
 backend:
+  - task: "Connect Website + Fix pipeline (Profile → Fix button → live patch)"
+    implemented: true
+    working: "NA (user testing manually)"
+    file: "backend/server.py, backend/site_agent.py, frontend/src/pages/Profile.js, frontend/src/components/FixModal.js, frontend/src/pages/ProjectDetail.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA (user testing manually)"
+          agent: "main"
+          comment: "Built end-to-end: (1) NEW /app/backend/site_agent.py with public CORS-open endpoints: GET /api/site-agent/{sid}.js serves a small DOM-patching JS payload; POST /api/site-agent/{sid}/ping auto-detects the customer's domain from Origin/Referer, marks the connection verified on first ping; GET /api/site-agent/{sid}/patches returns pending patches filtered by page URL; POST /api/site-agent/{sid}/patches/{id}/ack marks applied. (2) Authenticated endpoints in server.py: GET/POST/DELETE /api/site-connections, POST /api/projects/{id}/fixes/generate (ONE Claude call, max_tokens=700; refuses & returns needs_connection=true if the user hasn't installed on the matching project domain, so we NEVER burn an LLM call when a connection is missing), POST /api/projects/{id}/fixes/apply (queues the patch after user approval), GET /api/projects/{id}/fixes (audit list). (3) FIXABLE issue codes mapped to 3 patch types: meta_title (missing_title, short_title, long_title), meta_description (missing_meta_description), content_block (thin_content, no_answer_paragraph, no_citation_statistics, no_faq_schema). Others return 400. (4) New /app/frontend/src/pages/Profile.js — beautiful Connect Website UI with copy-to-clipboard script tag, verified badge, auto-refresh every 10s, delete. (5) New /app/frontend/src/components/FixModal.js — FixButton next to each fixable per-page issue in ProjectDetail; opens modal that a) checks connection, b) if missing shows a link to /app/profile#connect-website, c) if present generates suggested fix, d) lets user edit + Approve & apply live. (6) Sidebar avatar/name is now a link to /app/profile. (7) MONGO indexes created on site_connections.script_id (unique), site_patches.script_id+status. (8) CORS: site-agent endpoints emit Access-Control-Allow-Origin: * so they work from any customer site. (9) APP_URL added to backend/.env so the generated script tag points to the public preview URL. Manual smoke test (curl) verified: create connection returns script tag, GET /api/site-agent/{sid}.js returns valid JS, POST /ping with Origin=https://example.com auto-verifies and stores domain=example.com, GET /patches returns empty list. USER EXPLICITLY REQUESTED: no AI testing agent — they'll test manually. NOT calling deep_testing_backend_v2. This is a NEW FEATURE (not a bug fix), so no system-reminder override applies."
+
   - task: "Timeout/502 fixes v2 — Domain Analysis + AI Visibility citations"
     implemented: true
     working: true
