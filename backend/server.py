@@ -3005,6 +3005,97 @@ async def delete_site_connection(conn_id: str, user: dict = Depends(get_current_
     return {"ok": True}
 
 
+class VerifySiteBody(BaseModel):
+    domain: Optional[str] = None
+
+
+async def _fetch_html_direct(url: str, timeout: int = 12) -> str:
+    """Zero-cost fetch via httpx (no TinyFish credit spend)."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
+                                     headers={"User-Agent": UA}) as client:
+            r = await client.get(url)
+            if 200 <= r.status_code < 400 and r.text:
+                return r.text
+    except Exception as e:
+        logger.info(f"direct-fetch failed for {url}: {e}")
+    return ""
+
+
+@api_router.post("/site-connections/{conn_id}/verify")
+async def verify_site_connection(conn_id: str, body: VerifySiteBody,
+                                 user: dict = Depends(get_current_user)):
+    """Server-side crawl to confirm the script tag is installed.
+
+    Strategy — MINIMAL credit spend:
+      1. Try a direct HTTPS/HTTP GET on the homepage (0 credit).
+      2. Only if that fails or returns HTML without the marker, fall back to
+         TinyFish's fetch API (paid, but capped to 1 URL per verify click).
+    """
+    doc = await db.site_connections.find_one({"id": conn_id, "user_id": user["id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    domain = _normalize_site_domain(body.domain or doc.get("domain") or "")
+    if not domain:
+        raise HTTPException(status_code=400, detail="Please provide the domain you installed the script on.")
+
+    marker = f"/api/site-agent/{doc['script_id']}.js"
+    candidates = [f"https://{domain}", f"https://{domain}/", f"http://{domain}"]
+
+    # --- Pass 1: direct fetch (0 credit) --------------------------------
+    reachable = False
+    for u in candidates:
+        html = await _fetch_html_direct(u)
+        if html:
+            reachable = True
+            if marker in html:
+                now = datetime.now(timezone.utc).isoformat()
+                await db.site_connections.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {"domain": domain, "verified": True, "verified_at": now,
+                              "last_ping_at": now}},
+                )
+                return {"verified": True, "domain": domain, "via": "direct"}
+
+    # --- Pass 2: TinyFish fallback (1 URL, 1 credit) --------------------
+    tf_html = ""
+    try:
+        res = await tf.tf_fetch([f"https://{domain}"], fmt="html")
+        results = (res or {}).get("results") or []
+        if results:
+            r0 = results[0] or {}
+            tf_html = r0.get("html") or r0.get("content") or r0.get("text") or ""
+    except Exception as e:
+        logger.info(f"tinyfish verify fetch failed for {domain}: {e}")
+
+    if tf_html:
+        reachable = True
+        if marker in tf_html:
+            now = datetime.now(timezone.utc).isoformat()
+            await db.site_connections.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"domain": domain, "verified": True, "verified_at": now,
+                          "last_ping_at": now}},
+            )
+            return {"verified": True, "domain": domain, "via": "tinyfish"}
+
+    if not reachable:
+        return {
+            "verified": False,
+            "reason": f"Couldn't reach https://{domain}. Is the site live and public?",
+        }
+    return {
+        "verified": False,
+        "reason": (
+            "We reached your site but couldn't find the Citetail script tag on the homepage. "
+            "Double-check that the exact <script> above is inside your <head> and that the page "
+            "you tested (usually your homepage) contains it. If the tag is on a different route, "
+            "visit that route once so we can auto-verify — or install it site-wide."
+        ),
+    }
+
+
 # ---------- Fix generate / apply ---------------------------------------
 
 _FIX_SYSTEM = (

@@ -16,6 +16,7 @@ import {
   User as UserIcon,
   Code2,
   Loader2,
+  ShieldCheck,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui-bits";
 
@@ -49,8 +50,35 @@ function CopyBox({ value }) {
   );
 }
 
-function ConnectionCard({ conn, onRefresh, onDelete }) {
+function ConnectionCard({ conn, onRefresh, onDelete, onVerified }) {
   const verified = !!conn.verified;
+  const [verifying, setVerifying] = useState(false);
+  const [domainInput, setDomainInput] = useState(conn.domain || "");
+  const [failReason, setFailReason] = useState("");
+
+  const verify = async () => {
+    setFailReason("");
+    const target = (domainInput || conn.domain || "").trim();
+    if (!target) {
+      toast.error("Please enter the domain you installed the script on.");
+      return;
+    }
+    setVerifying(true);
+    try {
+      const { data } = await http.post(`/site-connections/${conn.id}/verify`, { domain: target });
+      if (data?.verified) {
+        toast.success(`Verified! Script found on ${data.domain}`);
+        onVerified?.();
+      } else {
+        setFailReason(data?.reason || "Not verified — script tag not found on your homepage.");
+      }
+    } catch (e) {
+      setFailReason(formatApiErrorDetail(e) || "Verification failed.");
+    } finally {
+      setVerifying(false);
+    }
+  };
+
   return (
     <Card className="p-5 rounded-xl border-border/60">
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -76,7 +104,7 @@ function ConnectionCard({ conn, onRefresh, onDelete }) {
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600 bg-amber-500/10 px-2 py-0.5 rounded-full">
-                  <AlertCircle size={11} /> Waiting for install
+                  <AlertCircle size={11} /> Not connected yet
                 </span>
               )}
             </div>
@@ -106,11 +134,54 @@ function ConnectionCard({ conn, onRefresh, onDelete }) {
         </div>
         <CopyBox value={conn.script_tag || ""} />
         <div className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-          After adding the tag, visit any page of your site. We'll detect the domain
-          on the first ping and mark this connection verified automatically. Then any
-          "Fix" you approve inside a project report will apply live within ~20&nbsp;seconds.
+          After adding the tag, visit any page of your site — we auto-detect the
+          domain on the first ping. Or click <b>Verify now</b> below and we'll
+          crawl your homepage to confirm the tag is installed.
         </div>
       </div>
+
+      {!verified ? (
+        <div className="mt-4 pt-4 border-t border-border/50">
+          <div className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground mb-2 flex items-center gap-1.5">
+            <ShieldCheck size={11} /> Verify installation
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Input
+              placeholder="yoursite.com"
+              value={domainInput}
+              onChange={(e) => setDomainInput(e.target.value)}
+              className="flex-1 min-w-[200px]"
+              data-testid={`verify-domain-${conn.id}`}
+            />
+            <Button
+              onClick={verify}
+              disabled={verifying}
+              className="bg-emerald-600 hover:bg-emerald-700"
+              data-testid={`verify-btn-${conn.id}`}
+            >
+              {verifying ? (
+                <>
+                  <Loader2 size={14} className="mr-2 animate-spin" /> Crawling…
+                </>
+              ) : (
+                <>
+                  <ShieldCheck size={14} className="mr-2" /> Verify now
+                </>
+              )}
+            </Button>
+          </div>
+          {failReason ? (
+            <div className="mt-2 text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+              {failReason}
+            </div>
+          ) : (
+            <div className="mt-1.5 text-[11px] text-muted-foreground">
+              We'll crawl <span className="font-mono">https://{(domainInput || "yoursite.com").replace(/^https?:\/\//, "")}</span>{" "}
+              and check the &lt;head&gt; for your script tag.
+            </div>
+          )}
+        </div>
+      ) : null}
     </Card>
   );
 }
@@ -256,6 +327,7 @@ export default function Profile() {
               conn={c}
               onRefresh={load}
               onDelete={() => removeConnection(c.id)}
+              onVerified={load}
             />
           ))}
         </div>
