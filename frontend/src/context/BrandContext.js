@@ -74,6 +74,21 @@ export function BrandProvider({ children }) {
   return <BrandContext.Provider value={value}>{children}</BrandContext.Provider>;
 }
 
+/** Small helper for pretty logos: Google's favicon service is free and CORS-friendly. */
+export function faviconUrl(host, size = 64) {
+  if (!host) return "";
+  const h = String(host).trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/^www\./, "");
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(h)}&sz=${size}`;
+}
+
+/** Rough domain guess for a competitor when only a display name is stored. */
+export function guessDomain(nameOrDomain) {
+  const raw = String(nameOrDomain || "").trim();
+  if (!raw) return "";
+  if (raw.includes(".") && !raw.includes(" ")) return raw.toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/^www\./, "");
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, "") + ".com";
+}
+
 export function useBrand() {
   const ctx = useContext(BrandContext);
   if (!ctx) throw new Error("useBrand must be used within BrandProvider");
