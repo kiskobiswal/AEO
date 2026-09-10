@@ -5,7 +5,7 @@ import { useBrand } from "@/context/BrandContext";
 import { http } from "@/lib/api";
 import {
   Globe, Link2, MessageSquare, FileText, LogOut, Heart, Bot, ShieldCheck, Newspaper, Lock,
-  LayoutDashboard, ChevronDown, Plus, Check, CheckCircle2, Radar,
+  LayoutDashboard, ChevronDown, Plus, Check, CheckCircle2, Radar, FolderKanban,
 } from "lucide-react";
 
 /**
@@ -32,6 +32,7 @@ import {
 
 const BRAND_TOP = [
   { to: "/app/overview", label: "Overview", icon: LayoutDashboard },
+  { to: "/app/site-audit", label: "Site Audit", icon: FolderKanban },
   { to: "/app/prompts", label: "Prompts", icon: MessageSquare, feature: "visibility" },
   { to: "/app/citations", label: "Citations", icon: Link2, feature: "citations" },
 ];
