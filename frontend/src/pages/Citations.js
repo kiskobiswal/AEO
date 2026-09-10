@@ -6,8 +6,8 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  Link2, Loader2, Sparkles, RefreshCw, ExternalLink, ShieldCheck, Filter, Globe,
-  Newspaper, MessageSquare, BookOpen, FileText, Video, Users, ChevronDown,
+  Link2, Loader2, Sparkles, RefreshCw, ExternalLink, ShieldCheck, Globe,
+  Newspaper, MessageSquare, BookOpen, FileText, Video, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -82,7 +82,6 @@ export default function Citations() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [rescanning, setRescanning] = useState(false);
-  const [filter, setFilter] = useState("all");
   const brandId = selected?.id;
 
   useEffect(() => {
@@ -123,17 +122,6 @@ export default function Citations() {
     return Array.from(map.values());
   }, [report]);
 
-  const filtered = useMemo(() => {
-    if (filter === "all") return allCitations;
-    return allCitations.filter((c) => (c.type || "web") === filter);
-  }, [allCitations, filter]);
-
-  const typeCounts = useMemo(() => {
-    const m = { all: allCitations.length };
-    allCitations.forEach((c) => { const t = c.type || "web"; m[t] = (m[t] || 0) + 1; });
-    return m;
-  }, [allCitations]);
-
   if (!hasAny || !selected) {
     return (
       <div className="min-h-[60vh] grid place-items-center">
@@ -157,7 +145,7 @@ export default function Citations() {
           <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400">{selected.name}</div>
           <h1 className="font-head text-3xl font-extrabold tracking-tight mt-1">Citations</h1>
           <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-            Every third-party page currently citing <b>{selected.domain}</b> across the open web — real URLs verified by TinyFish + Serper.
+            Every third-party page currently citing <b>{selected.domain}</b> across the open web — real URLs fetched via TinyFish.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -168,57 +156,26 @@ export default function Citations() {
         </div>
       </div>
 
-      {/* stat cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-        <Card className="p-4 rounded-xl border-slate-200">
-          <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Total Citations</div>
-          <div className="font-head text-3xl font-extrabold text-slate-900 mt-1 tabular-nums">{allCitations.length}</div>
-        </Card>
-        <Card className="p-4 rounded-xl border-slate-200">
-          <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Verified</div>
-          <div className="font-head text-3xl font-extrabold text-emerald-600 mt-1 tabular-nums">{allCitations.filter((c) => c.verified).length}</div>
-        </Card>
-        <Card className="p-4 rounded-xl border-slate-200">
-          <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400">High Authority</div>
-          <div className="font-head text-3xl font-extrabold text-indigo-600 mt-1 tabular-nums">{allCitations.filter((c) => (c.authority || 0) >= 70).length}</div>
-        </Card>
-        <Card className="p-4 rounded-xl border-slate-200">
-          <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Unique Domains</div>
-          <div className="font-head text-3xl font-extrabold text-slate-900 mt-1 tabular-nums">{new Set(allCitations.map((c) => c.domain)).size}</div>
-        </Card>
-      </div>
-
-      {/* filters */}
-      <div className="flex items-center gap-2 flex-wrap mb-4">
-        <Filter size={14} className="text-slate-400" />
-        {TYPES_ORDER.map((t) => (
-          <button key={t} onClick={() => setFilter(t)}
-            className={`text-xs font-semibold px-3 py-1.5 rounded-md border transition-colors ${filter === t ? "bg-indigo-600 border-indigo-600 text-white" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"}`}>
-            {t === "all" ? "All" : typeMeta(t).label}
-            <span className="ml-1 opacity-70 tabular-nums">{typeCounts[t] || 0}</span>
-          </button>
-        ))}
-      </div>
-
       {loading && !report ? (
         <div className="py-10 text-center text-slate-500 text-sm"><Loader2 className="inline animate-spin mr-2" size={14} />Loading real citations…</div>
-      ) : filtered.length === 0 ? (
+      ) : allCitations.length === 0 ? (
         <Card className="p-12 rounded-xl border-slate-200 text-center">
           <Link2 size={30} className="mx-auto text-slate-300 mb-3" />
           <div className="font-head font-bold text-slate-800">No citations found yet</div>
-          <p className="text-sm text-slate-500 mt-1">
-            {allCitations.length === 0
-              ? "Click Rescan to run a fresh Serper + TinyFish search across the open web."
-              : "Nothing matches this filter — try 'All'."}
-          </p>
-          {allCitations.length === 0 && <Button className="btn-brand mt-4" onClick={rescan} disabled={rescanning}>
+          <p className="text-sm text-slate-500 mt-1">Click Rescan to fetch every page currently citing your brand.</p>
+          <Button className="btn-brand mt-4" onClick={rescan} disabled={rescanning}>
             {rescanning ? "Scanning…" : "Rescan now"}
-          </Button>}
+          </Button>
         </Card>
       ) : (
-        <div className="space-y-3">
-          {filtered.map((s, i) => <CitationRow key={s.url + i} s={s} i={i} />)}
-        </div>
+        <>
+          <div className="text-xs text-slate-400 mb-3 tabular-nums" data-testid="citations-count">
+            {allCitations.length} citation{allCitations.length === 1 ? "" : "s"} · {new Set(allCitations.map((c) => c.domain)).size} unique domain{new Set(allCitations.map((c) => c.domain)).size === 1 ? "" : "s"}
+          </div>
+          <div className="space-y-3" data-testid="citations-list">
+            {allCitations.map((s, i) => <CitationRow key={s.url + i} s={s} i={i} />)}
+          </div>
+        </>
       )}
     </div>
   );

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
-import { useBrand } from "@/context/BrandContext";
+import { useBrand, faviconUrl } from "@/context/BrandContext";
 import { http } from "@/lib/api";
 import {
   Globe, Link2, MessageSquare, FileText, LogOut, Heart, Bot, ShieldCheck, Newspaper, Lock,
@@ -74,7 +74,10 @@ function BrandSwitcher() {
   const { brands, selected, selectBrand } = useBrand();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [selectedLogoBroken, setSelectedLogoBroken] = useState(false);
   const ref = useRef(null);
+
+  useEffect(() => { setSelectedLogoBroken(false); }, [selected?.id]);
 
   useEffect(() => {
     const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
@@ -96,6 +99,8 @@ function BrandSwitcher() {
     );
   }
 
+  const selFavicon = faviconUrl(selected.domain, 64);
+
   return (
     <div className="relative" ref={ref}>
       <button
@@ -104,8 +109,12 @@ function BrandSwitcher() {
         className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg border transition-all ${open ? "border-indigo-300 bg-indigo-50/60" : "border-slate-200 bg-white hover:border-slate-300"}`}
         data-testid="brand-switcher"
       >
-        <div className="w-8 h-8 rounded-md grid place-items-center text-white text-[11px] font-bold shrink-0" style={{ background: colorFor(selected.id) }}>
-          {initials(selected.name)}
+        <div className="w-8 h-8 rounded-md overflow-hidden border border-slate-200 bg-white grid place-items-center shrink-0" data-testid="brand-switcher-logo">
+          {selFavicon && !selectedLogoBroken ? (
+            <img src={selFavicon} alt={selected.name} className="w-full h-full object-contain" onError={() => setSelectedLogoBroken(true)} />
+          ) : (
+            <div className="w-full h-full grid place-items-center text-white text-[11px] font-bold" style={{ background: colorFor(selected.id) }}>{initials(selected.name)}</div>
+          )}
         </div>
         <div className="min-w-0 flex-1 text-left">
           <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Brand</div>
@@ -118,22 +127,7 @@ function BrandSwitcher() {
         <div className="absolute left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-lg shadow-lg z-50 overflow-hidden" data-testid="brand-switcher-menu">
           <div className="max-h-[300px] overflow-y-auto">
             {brands.map((b) => (
-              <button
-                key={b.id}
-                type="button"
-                onClick={() => { selectBrand(b.id); setOpen(false); }}
-                className={`w-full flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 text-left transition-colors ${b.id === selected.id ? "bg-indigo-50/60" : ""}`}
-                data-testid={`brand-option-${b.id}`}
-              >
-                <div className="w-6 h-6 rounded grid place-items-center text-white text-[10px] font-bold shrink-0" style={{ background: colorFor(b.id) }}>
-                  {initials(b.name)}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-semibold text-slate-800 truncate">{b.name}</div>
-                  <div className="text-[10px] text-slate-400 truncate">{b.domain}</div>
-                </div>
-                {b.id === selected.id && <Check size={13} className="text-indigo-600 shrink-0" />}
-              </button>
+              <BrandDropdownItem key={b.id} b={b} active={b.id === selected.id} onPick={() => { selectBrand(b.id); setOpen(false); }} />
             ))}
           </div>
           <button
@@ -148,6 +142,32 @@ function BrandSwitcher() {
         </div>
       )}
     </div>
+  );
+}
+
+function BrandDropdownItem({ b, active, onPick }) {
+  const [broken, setBroken] = useState(false);
+  const src = faviconUrl(b.domain, 64);
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      className={`w-full flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 text-left transition-colors ${active ? "bg-indigo-50/60" : ""}`}
+      data-testid={`brand-option-${b.id}`}
+    >
+      <div className="w-6 h-6 rounded overflow-hidden border border-slate-200 bg-white grid place-items-center shrink-0">
+        {src && !broken ? (
+          <img src={src} alt={b.name} onError={() => setBroken(true)} className="w-full h-full object-contain" />
+        ) : (
+          <div className="w-full h-full grid place-items-center text-white text-[10px] font-bold" style={{ background: colorFor(b.id) }}>{initials(b.name)}</div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-semibold text-slate-800 truncate">{b.name}</div>
+        <div className="text-[10px] text-slate-400 truncate">{b.domain}</div>
+      </div>
+      {active && <Check size={13} className="text-indigo-600 shrink-0" />}
+    </button>
   );
 }
 

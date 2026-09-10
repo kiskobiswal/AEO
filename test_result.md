@@ -864,3 +864,131 @@ agent_communication:
         ✓ Response times fast: 2.79s - 4.25s
         
         NO ISSUES FOUND. Backend is production-ready. Main agent should summarize and finish.
+
+# --- Bug fix round: Citations list + Sidebar brand favicon + Prompts engine logos ---
+user_problem_statement: |
+  User reports 3 UI issues after the brand redesign:
+  1) Citations page still has a "search box" (stat cards + filter chips) — user wants
+     just a clean list of all citations for the current brand.
+  2) The brand-switcher in the left sidebar still shows the colored-initials tile
+     instead of the actual website favicon/logo.
+  3) The engine chips on the Prompts cards show a single letter on a colored circle
+     instead of the real AI engine logos (ChatGPT, Perplexity, Gemini, Claude,
+     Copilot, Google AI, Grok).
+
+frontend:
+  - task: "Citations page — pure list, no search/filter/stat-card chrome"
+    implemented: true
+    working: true
+    file: "frontend/src/pages/Citations.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Removed the stat-card row, the type filter chips, and the derived
+            `filtered/typeCounts` state from Citations.js. The page now renders a
+            single `data-testid="citations-list"` block of rows (all citations for
+            the selected brand's domain) plus a small "N citation · M unique
+            domain" counter above. The Rescan button (top-right) still fires
+            POST /api/brands/:id/scan which pulls citations via the existing
+            TinyFish/Serper pipeline in real_citation_sources(). No backend
+            change was needed.
+        - working: true
+          agent: "testing"
+          comment: |
+            PASS with minor note. Citations page verified as pure list: ✓ Header "Citations" renders ✓ Rescan button visible (data-testid="citations-rescan-btn") ✓ NO search box found ✓ NO filter chips found (All/Reference/Review/News/Forum/Directory/Social/Video) ✓ Citations count line renders: "45 citations · 31 unique domains" (data-testid="citations-count") ✓ Citations list container exists with 45 rows (data-testid="citations-list"). Minor note: Test detected "Verified" text on page, but this is NOT a stat card - it's a badge on individual citation rows (line 64 of Citations.js) indicating verified citations. The page correctly has NO stat cards (Total Citations / Verified / High Authority / Unique Domains). All requirements met.
+
+  - task: "Sidebar brand-switcher — real favicon instead of initials tile"
+    implemented: true
+    working: true
+    file: "frontend/src/components/Sidebar.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            BrandSwitcher now renders an <img> served by Google's s2 favicon
+            service (via faviconUrl(domain) helper in BrandContext) for the
+            currently selected brand AND every brand row in the dropdown.
+            When the favicon fails to load we fall back to the previous
+            initials tile automatically (onError → broken state). Added the
+            data-testid="brand-switcher-logo" hook on the selected-brand
+            image container for testing.
+        - working: true
+          agent: "testing"
+          comment: |
+            PASS. Sidebar brand-switcher verified: ✓ Selected brand (Citetail) shows REAL favicon from Google's s2 service (https://www.google.com/s2/favicons?domain=citetail.com&sz=64) ✓ Dropdown opened successfully ✓ All 2 brand options in dropdown show REAL favicons from Google's s2 service ✓ Fallback to initials tile works correctly when favicon fails to load. All requirements met.
+
+  - task: "Prompts page — real AI engine logos on the coverage chips"
+    implemented: true
+    working: true
+    file: "frontend/src/pages/Prompts.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            EngineChip switched from letter-on-color to a favicon-bearing chip:
+            each engine now has a logoDomain (openai.com, perplexity.ai,
+            gemini.google.com, claude.ai, copilot.microsoft.com, google.com,
+            x.ai) and we fetch the real logo via Google's s2 favicon service.
+            Active chips are outlined emerald + get a green check dot; inactive
+            chips are muted with a slate dot. Fallback to the engine's first
+            letter if the favicon fails to load.
+        - working: true
+          agent: "testing"
+          comment: |
+            PASS. Prompts page engine logos verified: ✓ Navigated to /app/prompts ✓ Rescan button visible ✓ Found 4 prompt cards ✓ First card contains 7 engine chips (expected 7) ✓ All 7 engine chips show REAL AI engine logos from Google's s2 favicon service: Engine 1: openai.com (ChatGPT), Engine 2: perplexity.ai (Perplexity), Engine 3: gemini.google.com (Gemini), Engine 4: claude.ai (Claude), Engine 5: copilot.microsoft.com (Copilot), Engine 6: google.com (Google AI), Engine 7: x.ai (Grok). NO single letter fallbacks detected. All requirements met.
+
+metadata:
+  test_sequence: 5
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "Citations page — pure list, no search/filter/stat-card chrome"
+    - "Sidebar brand-switcher — real favicon instead of initials tile"
+    - "Prompts page — real AI engine logos on the coverage chips"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Please run FRONTEND UI verification only (backend is untouched). Auth
+        with admin@citetail.com / admin123.  Base URL from
+        frontend/.env REACT_APP_BACKEND_URL.
+
+        Scenarios:
+        1) Log in and land on /app/overview.
+           - Left sidebar: the currently-selected brand card ('Citetail') must
+             show a REAL favicon image (an <img>, not the colored initials
+             tile). Selector: [data-testid="brand-switcher-logo"] should contain
+             an <img> element with a src that includes 'google.com/s2/favicons'.
+           - Click the brand-switcher; every row in the dropdown menu should
+             also render an <img> favicon (not just initials) for its domain.
+        2) Navigate to /app/prompts. Each prompt card must render 7 engine
+           chips. Inside each chip look for an <img> (Google favicon) for the
+           corresponding engine host — chatgpt=openai.com, perplexity=perplexity.ai,
+           gemini=gemini.google.com, claude=claude.ai, copilot=copilot.microsoft.com,
+           google_ai=google.com, grok=x.ai. There must be NO colored circles
+           with a single letter (those are the fallback and shouldn't appear
+           on this preview).
+        3) Navigate to /app/citations. Expected:
+           - No "Filter" bar, no "All 45 / Reference 30 / Review 4..." chips,
+             no big stat cards.  Just the header (h1 + subtitle + Rescan)
+             and a single [data-testid="citations-list"] block with rows.
+           - Optionally a small "N citation · M unique domain" line above
+             the list. The list must have >= 1 row for the seeded 'Citetail'
+             brand (its report has ~45 citations already cached).
+        4) Sanity check: click Rescan on Citations, wait ~30-60s, no crash;
+           list either grows or stays the same size, but page never becomes
+           blank.

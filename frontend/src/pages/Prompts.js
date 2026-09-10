@@ -20,27 +20,30 @@ import { toast } from "sonner";
  */
 
 const ENGINES = [
-  { key: "chatgpt", label: "ChatGPT", color: "#10A37F" },
-  { key: "perplexity", label: "Perplexity", color: "#1FB8CD" },
-  { key: "gemini", label: "Gemini", color: "#4285F4" },
-  { key: "claude", label: "Claude", color: "#D97757" },
-  { key: "copilot", label: "Copilot", color: "#0067C0" },
-  { key: "google_ai", label: "Google AI", color: "#EA4335" },
-  { key: "grok", label: "Grok", color: "#1F2937" },
+  { key: "chatgpt", label: "ChatGPT", color: "#10A37F", logoDomain: "openai.com" },
+  { key: "perplexity", label: "Perplexity", color: "#1FB8CD", logoDomain: "perplexity.ai" },
+  { key: "gemini", label: "Gemini", color: "#4285F4", logoDomain: "gemini.google.com" },
+  { key: "claude", label: "Claude", color: "#D97757", logoDomain: "claude.ai" },
+  { key: "copilot", label: "Copilot", color: "#0067C0", logoDomain: "copilot.microsoft.com" },
+  { key: "google_ai", label: "Google AI", color: "#EA4335", logoDomain: "google.com" },
+  { key: "grok", label: "Grok", color: "#1F2937", logoDomain: "x.ai" },
 ];
 
 function EngineChip({ engine, active }) {
-  const color = active ? engine.color : "#CBD5E1";
-  const label = engine.label.charAt(0);
+  const [broken, setBroken] = useState(false);
+  const src = faviconUrl(engine.logoDomain, 64);
   return (
     <div
       title={engine.label + (active ? " · answered" : " · not detected")}
-      className={`relative w-8 h-8 rounded-full grid place-items-center text-white text-[11px] font-bold ring-2 ${active ? "ring-emerald-100" : "ring-slate-100"}`}
-      style={{ background: color }}
+      className={`relative w-9 h-9 rounded-full grid place-items-center bg-white border-2 shrink-0 ${active ? "border-emerald-200 shadow-[0_2px_6px_-2px_rgba(16,185,129,0.35)]" : "border-slate-200 opacity-60"}`}
     >
-      {label}
+      {src && !broken ? (
+        <img src={src} alt={engine.label} onError={() => setBroken(true)} className="w-5 h-5 object-contain" />
+      ) : (
+        <span className="text-[11px] font-bold" style={{ color: engine.color }}>{engine.label.charAt(0)}</span>
+      )}
       <div className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full grid place-items-center ring-2 ring-white ${active ? "bg-emerald-500" : "bg-slate-300"}`}>
-        {active ? <CheckCircle2 size={10} className="text-white" /> : <XCircle size={10} className="text-white" />}
+        {active ? <CheckCircle2 size={9} className="text-white" /> : <XCircle size={9} className="text-white" />}
       </div>
     </div>
   );
