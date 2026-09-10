@@ -3336,6 +3336,9 @@ from subscriptions import subs_router as _subs_router, razorpay_webhook_router a
 app.include_router(_subs_router)
 app.include_router(_razorpay_webhook_router, prefix="/api")
 
+from brands import brands_router as _brands_router  # noqa: E402
+app.include_router(_brands_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,

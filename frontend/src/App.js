@@ -1,6 +1,7 @@
 import "@/App.css";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { BrandProvider, useBrand } from "@/context/BrandContext";
 import { Layout } from "@/components/Layout";
 import Auth from "@/pages/Auth";
 import AdminAuth from "@/pages/AdminAuth";
@@ -10,6 +11,9 @@ import PaymentSuccess from "@/pages/PaymentSuccess";
 import PaymentCancel from "@/pages/PaymentCancel";
 import Upgrade from "@/pages/Upgrade";
 import Overview from "@/pages/Overview";
+import BrandOverview from "@/pages/BrandOverview";
+import BrandSetup from "@/pages/BrandSetup";
+import Prompts from "@/pages/Prompts";
 import DomainAnalysis from "@/pages/DomainAnalysis";
 import Visibility from "@/pages/Visibility";
 import Citations from "@/pages/Citations";
@@ -37,6 +41,25 @@ function Protected({ children, allowInactive = false }) {
   return <Layout>{children}</Layout>;
 }
 
+// First-time user flow: block the /app/* dashboard until at least one brand
+// exists. Setup/upgrade/profile routes are exempt so users can complete the
+// wizard or manage their account without being locked out.
+const SETUP_EXEMPT_PREFIXES = ["/app/brands", "/app/upgrade", "/app/profile"];
+
+function BrandGate({ children }) {
+  const { ready, hasAny } = useBrand();
+  const location = useLocation();
+  if (!ready) return <div className="min-h-screen grid place-items-center"><Loader2 className="animate-spin text-muted-foreground" /></div>;
+  const exempt = SETUP_EXEMPT_PREFIXES.some((p) => location.pathname === p || location.pathname.startsWith(p + "/"));
+  if (!hasAny && !exempt) return <Navigate to="/app/brands/new?first=1" replace />;
+  return children;
+}
+
+function DashboardHome() {
+  // /app entrypoint: land users on the Brand Overview once setup is done.
+  return <Navigate to="/app/overview" replace />;
+}
+
 function LoginRoute() {
   const { user, ready } = useAuth();
   if (!ready) return <div className="min-h-screen grid place-items-center"><Loader2 className="animate-spin text-muted-foreground" /></div>;
@@ -55,37 +78,60 @@ function App() {
   return (
     <div className="App">
       <AuthProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/login" element={<LoginRoute />} />
-            <Route path="/pricing" element={<Pricing />} />
-            <Route path="/signup" element={<Signup />} />
-            <Route path="/payment/success" element={<PaymentSuccess />} />
-            <Route path="/payment/cancel" element={<PaymentCancel />} />
-            <Route path="/admin/auth" element={<AdminAuthRoute />} />
-            <Route path="/admin/register" element={<AdminAuthRoute />} />
-            <Route path="/admin/login" element={<AdminAuthRoute />} />
-            <Route path="/admin/reset" element={<AdminAuthRoute />} />
-            <Route path="/app" element={<Protected><Overview /></Protected>} />
-            <Route path="/app/projects" element={<Protected><Projects /></Protected>} />
-            <Route path="/app/projects/:id" element={<Protected><ProjectDetail /></Protected>} />
-            <Route path="/app/domain" element={<Protected><DomainAnalysis /></Protected>} />
-            <Route path="/app/visibility" element={<Protected><Visibility /></Protected>} />
-            <Route path="/app/citations" element={<Protected><Citations /></Protected>} />
-            <Route path="/app/sentiment" element={<Protected><SentimentAnalysis /></Protected>} />
-            <Route path="/app/reddit" element={<Protected><Reddit /></Protected>} />
-            <Route path="/app/brand" element={<Protected><BrandConsistency /></Protected>} />
-            <Route path="/app/pr" element={<Protected><PRCoverage /></Protected>} />
-            <Route path="/app/optimizer" element={<Protected><Optimizer /></Protected>} />
-            <Route path="/app/agent" element={<Protected><AiAgent /></Protected>} />
-            <Route path="/app/history" element={<Protected><History /></Protected>} />
-            <Route path="/app/analysis/:id" element={<Protected><AnalysisDetail /></Protected>} />
-            <Route path="/app/upgrade" element={<Protected allowInactive><Upgrade /></Protected>} />
-            <Route path="/app/profile" element={<Protected allowInactive><Profile /></Protected>} />
-            <Route path="*" element={<Navigate to="/app" replace />} />
-          </Routes>
-        </BrowserRouter>
-        <Toaster position="top-right" richColors />
+        <BrandProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/login" element={<LoginRoute />} />
+              <Route path="/pricing" element={<Pricing />} />
+              <Route path="/signup" element={<Signup />} />
+              <Route path="/payment/success" element={<PaymentSuccess />} />
+              <Route path="/payment/cancel" element={<PaymentCancel />} />
+              <Route path="/admin/auth" element={<AdminAuthRoute />} />
+              <Route path="/admin/register" element={<AdminAuthRoute />} />
+              <Route path="/admin/login" element={<AdminAuthRoute />} />
+              <Route path="/admin/reset" element={<AdminAuthRoute />} />
+
+              {/* Setup wizard — no BrandGate so first-run works */}
+              <Route path="/app/brands/new" element={<Protected><BrandSetup /></Protected>} />
+
+              {/* Brand-scoped dashboard */}
+              <Route path="/app" element={<Protected><BrandGate><DashboardHome /></BrandGate></Protected>} />
+              <Route path="/app/overview" element={<Protected><BrandGate><BrandOverview /></BrandGate></Protected>} />
+              <Route path="/app/prompts" element={<Protected><BrandGate><Prompts /></BrandGate></Protected>} />
+              <Route path="/app/citations" element={<Protected><BrandGate><Citations /></BrandGate></Protected>} />
+
+              {/* GEO */}
+              <Route path="/app/domain" element={<Protected><BrandGate><DomainAnalysis /></BrandGate></Protected>} />
+              <Route path="/app/citation-analysis" element={<Protected><BrandGate><Citations /></BrandGate></Protected>} />
+              <Route path="/app/sentiment" element={<Protected><BrandGate><SentimentAnalysis /></BrandGate></Protected>} />
+              <Route path="/app/reddit" element={<Protected><BrandGate><Reddit /></BrandGate></Protected>} />
+              <Route path="/app/brand-consistency" element={<Protected><BrandGate><BrandConsistency /></BrandGate></Protected>} />
+              <Route path="/app/pr" element={<Protected><BrandGate><PRCoverage /></BrandGate></Protected>} />
+              {/* Legacy alias */}
+              <Route path="/app/brand" element={<Navigate to="/app/brand-consistency" replace />} />
+              <Route path="/app/visibility" element={<Navigate to="/app/prompts" replace />} />
+
+              {/* AEO / Assistant */}
+              <Route path="/app/optimizer" element={<Protected><BrandGate><Optimizer /></BrandGate></Protected>} />
+              <Route path="/app/agent" element={<Protected><BrandGate><AiAgent /></BrandGate></Protected>} />
+              <Route path="/app/history" element={<Protected><BrandGate><History /></BrandGate></Protected>} />
+              <Route path="/app/analysis/:id" element={<Protected><BrandGate><AnalysisDetail /></BrandGate></Protected>} />
+
+              {/* Site Audit (renamed from Projects) — still reachable directly for admins/power users */}
+              <Route path="/app/site-audit" element={<Protected><BrandGate><Projects /></BrandGate></Protected>} />
+              <Route path="/app/site-audit/:id" element={<Protected><BrandGate><ProjectDetail /></BrandGate></Protected>} />
+              <Route path="/app/projects" element={<Navigate to="/app/site-audit" replace />} />
+              <Route path="/app/projects/:id" element={<Protected><BrandGate><ProjectDetail /></BrandGate></Protected>} />
+
+              {/* Account-management routes are exempt from BrandGate */}
+              <Route path="/app/upgrade" element={<Protected allowInactive><Upgrade /></Protected>} />
+              <Route path="/app/profile" element={<Protected allowInactive><Profile /></Protected>} />
+
+              <Route path="*" element={<Navigate to="/app" replace />} />
+            </Routes>
+          </BrowserRouter>
+          <Toaster position="top-right" richColors />
+        </BrandProvider>
       </AuthProvider>
     </div>
   );

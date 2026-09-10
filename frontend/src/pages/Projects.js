@@ -49,23 +49,23 @@ export default function Projects() {
     setCreating(true);
     try {
       const { data } = await http.post("/projects", { domain: d });
-      toast.success("Project created — scanning your site now");
+      toast.success("Site audit created — scanning your site now");
       setDomain("");
-      // jump straight into the project so the user sees progress
-      navigate(`/app/projects/${data.id}`);
+      // jump straight into the audit so the user sees progress
+      navigate(`/app/site-audit/${data.id}`);
     } catch (e) {
-      toast.error(formatApiErrorDetail(e.response?.data?.detail) || "Could not create project");
+      toast.error(formatApiErrorDetail(e.response?.data?.detail) || "Could not create site audit");
     } finally {
       setCreating(false);
     }
   };
 
   const remove = async (id) => {
-    if (!window.confirm("Delete this project and all its data?")) return;
+    if (!window.confirm("Delete this site audit and all its data?")) return;
     try {
       await http.delete(`/projects/${id}`);
       setItems((prev) => prev.filter((p) => p.id !== id));
-      toast.success("Project deleted");
+      toast.success("Site audit deleted");
     } catch (e) {
       toast.error(formatApiErrorDetail(e.response?.data?.detail));
     }
@@ -84,8 +84,8 @@ export default function Projects() {
   return (
     <div>
       <PageHeader
-        overline="Projects"
-        title="One Project per Domain"
+        overline="Site Audit"
+        title="One Site Audit per Domain"
         subtitle="Add a domain once — we crawl the whole site, score every page, find where the brand is cited on the web, and check the prompts AI ranks it for."
       />
 
@@ -103,7 +103,7 @@ export default function Projects() {
             />
           </div>
           <Button onClick={create} disabled={creating} className="btn-brand hover:opacity-90 shrink-0" data-testid="create-project-btn">
-            {creating ? <Loader2 size={16} className="animate-spin" /> : <><Sparkles size={16} className="mr-2" /> Add Project</>}
+            {creating ? <Loader2 size={16} className="animate-spin" /> : <><Sparkles size={16} className="mr-2" /> Add Site Audit</>}
           </Button>
         </div>
         <p className="text-xs text-muted-foreground mt-3">
@@ -116,7 +116,7 @@ export default function Projects() {
           <Loader2 size={22} className="animate-spin text-muted-foreground" />
         </Card>
       ) : items.length === 0 ? (
-        <EmptyState icon={FolderKanban} text="No projects yet — add your first domain above to run a full crawl + AI-search health check." />
+        <EmptyState icon={FolderKanban} text="No site audits yet — add your first domain above to run a full crawl + AI-search health check." />
       ) : (
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4" data-testid="projects-grid">
           {items.map((p) => (
@@ -155,7 +155,7 @@ export default function Projects() {
               </div>
 
               <div className="flex items-center gap-2 mt-4">
-                <Link to={`/app/projects/${p.id}`} className="flex-1">
+                <Link to={`/app/site-audit/${p.id}`} className="flex-1">
                   <Button variant="outline" className="w-full" data-testid={`open-project-${p.id}`}>Open <ArrowRight size={14} className="ml-1" /></Button>
                 </Link>
                 <Button variant="ghost" size="icon" title="Re-scan" onClick={() => rescan(p.id)} disabled={p.status === "processing"}>
