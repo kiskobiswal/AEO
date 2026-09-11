@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Link2, Loader2, Sparkles, RefreshCw, ExternalLink, ShieldCheck, Globe,
   Newspaper, MessageSquare, BookOpen, FileText, Video, Users,
-  ChevronDown, Wrench,
+  Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -38,7 +38,7 @@ const TYPES_ORDER = ["all", "reference", "review", "news", "forum", "directory",
 
 function typeMeta(k) { return TYPE_META[k] || TYPE_META.web; }
 
-function CitationRow({ s, i }) {
+function CitationRow({ s, i, action }) {
   const [broken, setBroken] = useState(false);
   const m = typeMeta(s.type);
   const Icon = m.icon;
@@ -62,7 +62,7 @@ function CitationRow({ s, i }) {
         <div className="flex items-center gap-2 mt-2.5 flex-wrap">
           <Badge className={`${m.color} border font-bold text-[10px] uppercase tracking-wider`}>{m.label}</Badge>
           <Badge className="bg-white border border-slate-200 text-slate-600 font-bold text-[10px]">Authority {s.authority || 0}</Badge>
-          {s.verified && <Badge className="bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold text-[10px]"><ShieldCheck size={9} className="mr-0.5" />Verified</Badge>}
+          {action ? action : (s.verified && <Badge className="bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold text-[10px]"><ShieldCheck size={9} className="mr-0.5" />Verified</Badge>)}
           {engines.length > 0 && (
             <div className="ml-auto flex items-center gap-1 text-[11px] text-slate-400">
               <span className="uppercase tracking-widest font-bold">Cited by</span>
@@ -77,20 +77,6 @@ function CitationRow({ s, i }) {
   );
 }
 
-/* Engines that cited the brand's own domain within a single prompt scan. */
-function brandEnginesOf(p, brandDomain) {
-  const bd = (brandDomain || "").toLowerCase();
-  if (!bd) return [];
-  const hosts = new Set([bd, `www.${bd}`]);
-  const set = new Set();
-  (p.sources || []).forEach((s) => {
-    if (hosts.has((s.domain || "").toLowerCase()) || (s.url || "").toLowerCase().includes(bd)) {
-      (s.engines || []).forEach((e) => set.add(e));
-    }
-  });
-  return Array.from(set);
-}
-
 /* Sources within a prompt scan that mention any tracked competitor. */
 function competitorSourcesOf(p, competitors) {
   const needles = (competitors || []).map((c) => (c || "").toLowerCase()).filter(Boolean);
@@ -99,82 +85,6 @@ function competitorSourcesOf(p, competitors) {
     const hay = `${s.title || ""} ${s.why || ""} ${s.domain || ""}`.toLowerCase();
     return needles.some((n) => hay.includes(n));
   });
-}
-
-function EngineList({ engines }) {
-  if (!engines.length) return null;
-  return (
-    <div className="flex items-center gap-1 text-[11px] text-slate-400">
-      <span className="uppercase tracking-widest font-bold">Cited by</span>
-      {engines.slice(0, 7).map((e, idx) => (
-        <span key={e} className="capitalize text-slate-700 font-semibold">
-          {e.replace("_", " ")}{idx < Math.min(engines.length, 7) - 1 ? "," : ""}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-/* Prompts tab: one card per tracked prompt; expands to its source citations. */
-function PromptCard({ p, i, brandDomain, totalEngines }) {
-  const [open, setOpen] = useState(false);
-  const brandEngines = brandEnginesOf(p, brandDomain);
-  const engines = p.engines_covered || [];
-  return (
-    <div>
-      <Card
-        onClick={() => setOpen((v) => !v)}
-        data-testid={`prompt-card-${i}`}
-        className="p-4 rounded-xl border-slate-200 hover:border-indigo-200 hover:shadow-[0_4px_16px_-8px_rgba(99,102,241,0.2)] transition-all flex items-start gap-4 cursor-pointer group"
-      >
-        <span className="font-head font-extrabold text-base text-slate-300 w-6 text-center shrink-0 pt-1">{i + 1}</span>
-        <div className="flex-1 min-w-0">
-          <div className="text-[15px] font-semibold text-slate-900 group-hover:text-indigo-700 line-clamp-2">{p.prompt}</div>
-          <div className="text-[12px] text-slate-500 mt-0.5 tabular-nums">{brandEngines.length}/{totalEngines} engines cited this brand</div>
-          <div className="flex items-center gap-2 mt-2.5 flex-wrap">
-            <EngineList engines={engines} />
-            <ChevronDown size={14} className={`ml-auto text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
-          </div>
-        </div>
-      </Card>
-      {open && (
-        <div className="mt-2 ml-6 space-y-2" data-testid={`prompt-sources-${i}`}>
-          {(p.sources || []).length === 0 ? (
-            <div className="text-xs text-slate-400 py-2">No source citations for this prompt.</div>
-          ) : (
-            (p.sources || []).map((s, k) => <CitationRow key={(s.url || "") + k} s={s} i={k} />)
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* Missing tab: prompt where competitors were cited but the brand was not. */
-function MissingCard({ p, i, competitors, onFix }) {
-  const compSources = competitorSourcesOf(p, competitors);
-  const compEngines = Array.from(new Set(compSources.flatMap((s) => s.engines || [])));
-  return (
-    <Card data-testid={`missing-card-${i}`} className="p-4 rounded-xl border-slate-200 hover:border-indigo-200 hover:shadow-[0_4px_16px_-8px_rgba(99,102,241,0.2)] transition-all flex items-start gap-4 group">
-      <span className="font-head font-extrabold text-base text-slate-300 w-6 text-center shrink-0 pt-1">{i + 1}</span>
-      <div className="flex-1 min-w-0">
-        <div className="text-[15px] font-semibold text-slate-900 line-clamp-2">{p.prompt}</div>
-        <div className="text-[12px] text-slate-500 mt-0.5">
-          Cited instead: <span className="font-semibold text-slate-700">{(p.competitors_found || []).join(", ")}</span>
-        </div>
-        <div className="flex items-center gap-2 mt-2.5 flex-wrap">
-          <EngineList engines={compEngines} />
-          <button
-            onClick={onFix}
-            data-testid={`fix-this-${i}`}
-            className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[#6366F1] text-white hover:bg-[#4F46E5] shadow-sm"
-          >
-            <Wrench size={11} /> Fix This
-          </button>
-        </div>
-      </div>
-    </Card>
-  );
 }
 
 const CITATION_TABS = [
@@ -232,9 +142,26 @@ export default function Citations() {
 
   // ---- tab data (all derived from the same cached brand report) ----
   const promptScans = report?.prompts || [];
-  const totalEngines = report?.engines_used?.length || 7;
   const promptsWithCitation = promptScans.filter((p) => (p.sources || []).length > 0).length;
   const missing = promptScans.filter((p) => !p.brand_found && (p.competitors_found || []).length > 0);
+
+  // Prompts tab: every citation link returned across prompt scans (deduped by URL)
+  const promptCitations = useMemo(() => {
+    const map = new Map();
+    promptScans.forEach((p) => (p.sources || []).forEach((s) => {
+      if (s.url && !map.has(s.url)) map.set(s.url, s);
+    }));
+    return Array.from(map.values());
+  }, [promptScans]);
+
+  // Missing tab: citation links that mention a competitor on prompts where the brand is absent
+  const missingCitations = useMemo(() => {
+    const map = new Map();
+    missing.forEach((p) => competitorSourcesOf(p, selected?.competitors || []).forEach((s) => {
+      if (s.url && !map.has(s.url)) map.set(s.url, s);
+    }));
+    return Array.from(map.values());
+  }, [report, selected]);
 
   if (!hasAny || !selected) {
     return (
@@ -327,9 +254,7 @@ export default function Citations() {
               {promptScans.length} prompt{promptScans.length === 1 ? "" : "s"} tracked · {promptsWithCitation} with at least one citation
             </div>
             <div className="space-y-3" data-testid="prompts-list">
-              {promptScans.map((p, i) => (
-                <PromptCard key={p.prompt + i} p={p} i={i} brandDomain={selected.domain} totalEngines={totalEngines} />
-              ))}
+              {promptCitations.map((s, i) => <CitationRow key={s.url + i} s={s} i={i} />)}
             </div>
           </>
         )
@@ -346,8 +271,21 @@ export default function Citations() {
               {missing.length} prompt{missing.length === 1 ? "" : "s"} where competitors are cited but {selected.name} isn&rsquo;t
             </div>
             <div className="space-y-3" data-testid="missing-list">
-              {missing.map((p, i) => (
-                <MissingCard key={p.prompt + i} p={p} i={i} competitors={selected.competitors || []} onFix={() => navigate("/app/agent")} />
+              {missingCitations.map((s, i) => (
+                <CitationRow
+                  key={s.url + i}
+                  s={s}
+                  i={i}
+                  action={
+                    <button
+                      onClick={() => navigate("/app/agent")}
+                      data-testid={`fix-this-${i}`}
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[#6366F1] text-white hover:bg-[#4F46E5] shadow-sm"
+                    >
+                      <Wrench size={11} /> Fix This
+                    </button>
+                  }
+                />
               ))}
             </div>
           </>
