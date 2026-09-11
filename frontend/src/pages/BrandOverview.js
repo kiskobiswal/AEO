@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useBrand, faviconUrl, guessDomain } from "@/context/BrandContext";
 import { http, formatApiErrorDetail } from "@/lib/api";
@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { FixModal } from "@/components/FixModal";
+import BrandOverviewSkeleton from "@/components/BrandOverviewSkeleton";
+import BrandSettingsModal from "@/components/BrandSettingsModal";
 
 /**
  * Brand Overview — real data pulled from GET/POST /api/brands/:id/report.
@@ -127,7 +129,7 @@ function MonthSelector({ value, onChange }) {
 
 export default function BrandOverview() {
   const navigate = useNavigate();
-  const { selected, hasAny } = useBrand();
+  const { selected, hasAny, reload } = useBrand();
 
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -135,6 +137,9 @@ export default function BrandOverview() {
   const [month, setMonth] = useState(pastTwelveMonths()[0].key);
   const [quickFixes, setQuickFixes] = useState(null); // { project_id, fixes: [] }
   const [openFix, setOpenFix] = useState(null);       // fix object whose FixModal is open
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const dashboardRef = useRef(null);
 
   const brandId = selected?.id;
 
@@ -169,6 +174,66 @@ export default function BrandOverview() {
       toast.error(formatApiErrorDetail(e.response?.data?.detail) || "Scan failed");
     } finally {
       setRescanning(false);
+    }
+  };
+
+  /**
+   * Generate Report — snapshots the on-screen dashboard and triggers a
+   * direct PDF download. No new tab, no email, no server round-trip.
+   * Uses jsPDF + html2canvas (already installed) so the PDF matches what
+   * the user is looking at pixel-for-pixel.
+   */
+  const generatePdf = async () => {
+    if (!dashboardRef.current || exporting) return;
+    setExporting(true);
+    try {
+      const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
+        import("html2canvas"),
+        import("jspdf"),
+      ]);
+      const node = dashboardRef.current;
+      node.classList.add("pdf-export");
+      // wait a tick so any class-driven style overrides apply
+      await new Promise((r) => setTimeout(r, 60));
+
+      const canvas = await html2canvas(node, {
+        backgroundColor: "#ffffff",
+        scale: Math.min(2, window.devicePixelRatio || 1.5),
+        useCORS: true,
+        logging: false,
+        windowWidth: node.scrollWidth,
+      });
+      node.classList.remove("pdf-export");
+
+      // Fit page width, paginate vertically
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+      const pageW = pdf.internal.pageSize.getWidth();
+      const pageH = pdf.internal.pageSize.getHeight();
+      const imgW = pageW - 40;                 // 20pt side margin
+      const imgH = (canvas.height * imgW) / canvas.width;
+      let heightLeft = imgH;
+      let position = 20;
+
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+      pdf.addImage(dataUrl, "JPEG", 20, position, imgW, imgH, undefined, "FAST");
+      heightLeft -= pageH - 40;
+      while (heightLeft > 0) {
+        position = 20 - (imgH - heightLeft);
+        pdf.addPage();
+        pdf.addImage(dataUrl, "JPEG", 20, position, imgW, imgH, undefined, "FAST");
+        heightLeft -= pageH - 40;
+      }
+
+      const stamp = new Date().toISOString().slice(0, 10);
+      const safe = (brandName || "brand").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      pdf.save(`citetail-${safe}-overview-${stamp}.pdf`);
+      toast.success("Report downloaded");
+    } catch (e) {
+      toast.error("Could not build the PDF");
+      // best-effort cleanup
+      try { dashboardRef.current?.classList.remove("pdf-export"); } catch { /* ignore */ }
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -289,8 +354,13 @@ export default function BrandOverview() {
   }
   if (!selected) return null;
 
+  // First-load skeleton — replace the whole dashboard while we fetch real data.
+  if (loading && !report) {
+    return <BrandOverviewSkeleton />;
+  }
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" ref={dashboardRef}>
       {/* -------- header -------- */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
@@ -331,18 +401,38 @@ export default function BrandOverview() {
           </div>
         </Card>
 
-        <div className="flex items-center gap-2">
+        {/* Actions column — Rescan / Generate Report stacked with Settings just below */}
+        <div className="flex items-start gap-2" data-pdf-hide="true">
           <MonthSelector value={month} onChange={setMonth} />
           <Button variant="outline" size="sm" className="h-9" onClick={rescan} disabled={rescanning} data-testid="overview-rescan">
             {rescanning ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : <RefreshCw size={14} className="mr-1.5" />}
             Rescan
           </Button>
-          <Button className="btn-brand h-9"><Download size={14} className="mr-1.5" />Generate Report</Button>
+          <div className="flex flex-col items-end gap-1.5">
+            <Button
+              className="btn-brand h-9"
+              onClick={generatePdf}
+              disabled={exporting}
+              data-testid="generate-report-btn"
+            >
+              {exporting ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : <Download size={14} className="mr-1.5" />}
+              {exporting ? "Building PDF…" : "Generate Report"}
+            </Button>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-indigo-700 font-semibold px-2 py-1 rounded-md hover:bg-slate-100 transition"
+              data-testid="brand-settings-btn"
+              aria-label="Brand settings"
+            >
+              <Settings size={12} /> Settings
+            </button>
+          </div>
         </div>
       </div>
 
       {loading && (
-        <div className="flex items-center gap-2 text-slate-500 text-sm"><Loader2 size={14} className="animate-spin" /> Loading real data…</div>
+        <div className="flex items-center gap-2 text-slate-500 text-sm" data-pdf-hide="true"><Loader2 size={14} className="animate-spin" /> Refreshing…</div>
       )}
 
       <p className="text-sm text-slate-500">
@@ -588,8 +678,15 @@ export default function BrandOverview() {
         <span>
           {report?.from_cache ? `Cached ${Math.round((report.cache_age_seconds || 0) / 60)} min ago` : "Live data"} · Real citations powered by Serper + Tavily + TinyFish
         </span>
-        <button onClick={() => navigate("/app/prompts")} className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 font-semibold">Manage prompts<ArrowUpRight size={11} /></button>
+        <button onClick={() => navigate("/app/prompts")} className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 font-semibold" data-pdf-hide="true">Manage prompts<ArrowUpRight size={11} /></button>
       </div>
+
+      <BrandSettingsModal
+        open={settingsOpen}
+        brand={selected}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={async () => { await reload(); }}
+      />
     </div>
   );
 }

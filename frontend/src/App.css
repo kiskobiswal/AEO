@@ -1,1 +1,6 @@
 .App { min-height: 100vh; }
+
+/* Snapshot mode for PDF export — hides UI-only affordances so the
+   generated report stays clean and static. */
+.pdf-export [data-pdf-hide="true"] { display: none !important; }
+.pdf-export button:not([data-pdf-hide]) { pointer-events: none; }
