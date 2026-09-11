@@ -80,6 +80,17 @@ const SEV_COLOR = {
   low: "bg-slate-50 text-slate-600 border-slate-200",
 };
 
+// AI answer engines tracked by the scan — logo served from each engine's real domain.
+const ENGINE_META = {
+  chatgpt: { label: "ChatGPT", domain: "chatgpt.com" },
+  perplexity: { label: "Perplexity", domain: "perplexity.ai" },
+  gemini: { label: "Gemini", domain: "gemini.google.com" },
+  claude: { label: "Claude", domain: "claude.ai" },
+  copilot: { label: "Copilot", domain: "copilot.microsoft.com" },
+  google_ai: { label: "Google AI Overviews", domain: "google.com" },
+  grok: { label: "Grok", domain: "grok.com" },
+};
+
 function shortPath(url) {
   try {
     const u = new URL(String(url || "").startsWith("http") ? url : "https://" + url);
@@ -339,24 +350,6 @@ export default function BrandOverview() {
         {report?.generated_at && <> · last scan <span className="tabular-nums">{new Date(report.generated_at).toLocaleString()}</span></>}
       </p>
 
-      {/* -------- automated insights -------- */}
-      {insights.length > 0 && (
-        <Card data-testid="insights-panel" className="p-5 rounded-xl border-slate-200">
-          <div className="flex items-center gap-2 mb-3">
-            <Lightbulb size={15} className="text-amber-500" />
-            <h3 className="font-head font-extrabold">Automated Insights</h3>
-          </div>
-          <ul className="space-y-2">
-            {insights.map((s, i) => (
-              <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
-                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0" />
-                <span>{s}</span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
-
       {/* -------- big chart + voice share side card -------- */}
       <div className="grid lg:grid-cols-[1fr_360px] gap-4">
         <Card className="p-6 rounded-xl border-slate-200">
@@ -410,6 +403,65 @@ export default function BrandOverview() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* -------- brand ranking + top prompts -------- */}
+      <div className="grid lg:grid-cols-2 gap-4">
+        <Card className="p-5 rounded-xl border-slate-200">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2"><h3 className="font-head font-extrabold">Brand Ranking</h3><Info size={13} className="text-slate-400" /></div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-[11px] uppercase tracking-widest text-slate-400 border-b border-slate-100">
+                <tr><th className="text-left font-bold py-2 pr-2">#</th><th className="text-left font-bold py-2">Brand</th><th className="text-left font-bold py-2">Mentions</th><th className="text-left font-bold py-2">Share</th></tr>
+              </thead>
+              <tbody>
+                {ranking.map((r, i) => (
+                  <tr key={r.name} className="border-b border-slate-50 hover:bg-slate-50/50">
+                    <td className="py-2 pr-2 text-slate-400">{i + 1}</td>
+                    <td className="py-2">
+                      <div className="flex items-center gap-2">
+                        <LogoTile domain={players.find((p) => p.name === r.name)?.domain || guessDomain(r.name)} name={r.name} size={20} colorSeed={r.name} />
+                        <span className={`font-medium ${r.isYou ? "text-indigo-700" : "text-slate-800"} truncate`}>{r.name}</span>
+                      </div>
+                    </td>
+                    <td className="py-2 tabular-nums">{r.mentions}</td>
+                    <td className="py-2 tabular-nums">{r.share_pct}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <Card className="p-5 rounded-xl border-slate-200">
+          <div className="flex items-center gap-2 mb-3"><h3 className="font-head font-extrabold">Top Prompts by Brand Mentions</h3><Info size={13} className="text-slate-400" /></div>
+          {promptScans.length === 0 ? (
+            <div className="py-10 text-center text-sm text-slate-500">
+              <MessageSquare size={22} className="mx-auto text-slate-300 mb-2" />
+              Run a scan to see how AI engines are answering your tracked prompts.
+              <div className="mt-3"><Button size="sm" variant="outline" onClick={rescan} disabled={rescanning}>{rescanning ? "Scanning…" : "Run first scan"}</Button></div>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-[11px] uppercase tracking-widest text-slate-400 border-b border-slate-100">
+                  <tr><th className="text-left font-bold py-2 pr-2">Rank</th><th className="text-left font-bold py-2">Prompt</th><th className="text-left font-bold py-2 whitespace-nowrap">Engines</th></tr>
+                </thead>
+                <tbody>
+                  {promptScans.slice(0, 10).map((p, i) => (
+                    <tr key={p.prompt + i} className="border-b border-slate-50">
+                      <td className="py-2 pr-2 text-slate-400 tabular-nums">{i + 1}</td>
+                      <td className="py-2 text-slate-800 truncate max-w-[380px]">{p.prompt}</td>
+                      <td className="py-2 tabular-nums">{p.score}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </Card>
@@ -487,77 +539,21 @@ export default function BrandOverview() {
         </Card>
       </div>
 
-      {/* -------- brand ranking + top prompts -------- */}
-      <div className="grid lg:grid-cols-2 gap-4">
-        <Card className="p-5 rounded-xl border-slate-200">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2"><h3 className="font-head font-extrabold">Brand Ranking</h3><Info size={13} className="text-slate-400" /></div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-[11px] uppercase tracking-widest text-slate-400 border-b border-slate-100">
-                <tr><th className="text-left font-bold py-2 pr-2">#</th><th className="text-left font-bold py-2">Brand</th><th className="text-left font-bold py-2">Mentions</th><th className="text-left font-bold py-2">Share</th></tr>
-              </thead>
-              <tbody>
-                {ranking.map((r, i) => (
-                  <tr key={r.name} className="border-b border-slate-50 hover:bg-slate-50/50">
-                    <td className="py-2 pr-2 text-slate-400">{i + 1}</td>
-                    <td className="py-2">
-                      <div className="flex items-center gap-2">
-                        <LogoTile domain={players.find((p) => p.name === r.name)?.domain || guessDomain(r.name)} name={r.name} size={20} colorSeed={r.name} />
-                        <span className={`font-medium ${r.isYou ? "text-indigo-700" : "text-slate-800"} truncate`}>{r.name}</span>
-                      </div>
-                    </td>
-                    <td className="py-2 tabular-nums">{r.mentions}</td>
-                    <td className="py-2 tabular-nums">{r.share_pct}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-
-        <Card className="p-5 rounded-xl border-slate-200">
-          <div className="flex items-center gap-2 mb-3"><h3 className="font-head font-extrabold">Top Prompts by Brand Mentions</h3><Info size={13} className="text-slate-400" /></div>
-          {promptScans.length === 0 ? (
-            <div className="py-10 text-center text-sm text-slate-500">
-              <MessageSquare size={22} className="mx-auto text-slate-300 mb-2" />
-              Run a scan to see how AI engines are answering your tracked prompts.
-              <div className="mt-3"><Button size="sm" variant="outline" onClick={rescan} disabled={rescanning}>{rescanning ? "Scanning…" : "Run first scan"}</Button></div>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-[11px] uppercase tracking-widest text-slate-400 border-b border-slate-100">
-                  <tr><th className="text-left font-bold py-2 pr-2">Rank</th><th className="text-left font-bold py-2">Prompt</th><th className="text-left font-bold py-2 whitespace-nowrap">Engines</th></tr>
-                </thead>
-                <tbody>
-                  {promptScans.slice(0, 10).map((p, i) => (
-                    <tr key={p.prompt + i} className="border-b border-slate-50">
-                      <td className="py-2 pr-2 text-slate-400 tabular-nums">{i + 1}</td>
-                      <td className="py-2 text-slate-800 truncate max-w-[380px]">{p.prompt}</td>
-                      <td className="py-2 tabular-nums">{p.score}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      </div>
-
       {/* -------- distribution by LLM (real if scanned) -------- */}
       {report?.engine_distribution?.length > 0 && (
         <Card className="p-5 rounded-xl border-slate-200">
           <div className="flex items-center gap-2 mb-4"><Sparkles size={16} className="text-indigo-500" /><h3 className="font-head font-extrabold">Distribution by LLM</h3></div>
           <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
             {report.engine_distribution.map((e) => {
-              const nice = { chatgpt: "ChatGPT", perplexity: "Perplexity", gemini: "Gemini", claude: "Claude", copilot: "Copilot", google_ai: "Google AI Overviews", grok: "Grok" }[e.key] || e.key;
+              const meta = ENGINE_META[e.key] || { label: e.key, domain: "" };
               return (
                 <div key={e.key}>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="font-medium text-slate-700">{nice}</span>
-                    <span className="text-slate-500 tabular-nums text-xs">{e.mentions} · {e.share_pct}%</span>
+                    <span className="flex items-center gap-2 min-w-0">
+                      <LogoTile domain={meta.domain} name={meta.label} size={20} colorSeed={e.key} />
+                      <span className="font-medium text-slate-700 truncate">{meta.label}</span>
+                    </span>
+                    <span className="text-slate-500 tabular-nums text-xs shrink-0">{e.mentions} · {e.share_pct}%</span>
                   </div>
                   <div className="h-1.5 rounded-full bg-slate-100 mt-1 overflow-hidden">
                     <div className="h-full rounded-full bg-indigo-500" style={{ width: `${Math.min(100, e.share_pct * 2)}%` }} />
@@ -566,6 +562,24 @@ export default function BrandOverview() {
               );
             })}
           </div>
+        </Card>
+      )}
+
+      {/* -------- automated insights -------- */}
+      {insights.length > 0 && (
+        <Card data-testid="insights-panel" className="p-5 rounded-xl border-slate-200">
+          <div className="flex items-center gap-2 mb-3">
+            <Lightbulb size={15} className="text-amber-500" />
+            <h3 className="font-head font-extrabold">Automated Insights</h3>
+          </div>
+          <ul className="space-y-2">
+            {insights.map((s, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0" />
+                <span>{s}</span>
+              </li>
+            ))}
+          </ul>
         </Card>
       )}
 
