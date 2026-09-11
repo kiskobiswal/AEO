@@ -332,6 +332,132 @@ async def _run_brand_scan(brand: dict) -> dict:
     }
 
 
+# ---------------- Visibility score (0-100) + monthly history ----------------
+#
+# Weighted blend of what the report already measures:
+#   mention frequency 45% — brand_found across tracked prompts
+#   voice share       35% — brand share_pct of all mentions
+#   citations         20% — unique citing domains (capped at 10 for 100%)
+
+def _visibility_from_report(report: dict, brand_name: str, prompts_count: int) -> dict:
+    prompts = report.get("prompts") or []
+    total_prompts = prompts_count or len(prompts) or 0
+    brand_hits = sum(1 for p in prompts if p.get("brand_found"))
+    mention_score = round((brand_hits / total_prompts) * 100) if total_prompts else 0
+
+    share_pct = 0
+    for v in (report.get("voice_share") or []):
+        if v.get("name") == brand_name:
+            share_pct = v.get("share_pct") or 0
+            break
+
+    domains = set()
+    for c in (report.get("citations") or []):
+        d = (c.get("domain") or "").strip().lower()
+        if d:
+            domains.add(d)
+    for p in prompts:
+        for s in (p.get("sources") or []):
+            d = (s.get("domain") or "").strip().lower()
+            if d:
+                domains.add(d)
+    citation_score = min(100, len(domains) * 10)
+
+    score = round(0.45 * mention_score + 0.35 * share_pct + 0.20 * citation_score)
+    return {
+        "score": max(0, min(100, score)),
+        "mention_score": mention_score,
+        "share_pct": share_pct,
+        "citing_domains": len(domains),
+        "brand_hits": brand_hits,
+        "prompts_total": total_prompts,
+    }
+
+
+def _month_key(dt: datetime) -> str:
+    return f"{dt.year:04d}-{dt.month:02d}"
+
+
+async def _attach_visibility(brand_id: str, user_id: str, report: dict, brand: dict) -> dict:
+    """Compute the visibility score for this report, persist a monthly
+    snapshot, and attach `visibility` (score + delta vs previous month)."""
+    srv = _server()
+    vis = _visibility_from_report(report, brand.get("name") or "", len(brand.get("prompts") or []))
+    now = datetime.now(timezone.utc)
+    cur_key = _month_key(now)
+    prev_dt = datetime(now.year, now.month, 1)  # first of this month
+    prev_year, prev_month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+    prev_key = f"{prev_year:04d}-{prev_month:02d}"
+
+    try:
+        await srv.db.brand_metrics.update_one(
+            {"brand_id": brand_id, "month": cur_key},
+            {"$set": {"brand_id": brand_id, "user_id": user_id, "month": cur_key,
+                      "score": vis["score"], "updated_at": _now_iso()}},
+            upsert=True,
+        )
+        prev = await srv.db.brand_metrics.find_one({"brand_id": brand_id, "month": prev_key}, {"_id": 0})
+    except Exception as e:
+        logger.warning(f"brand_metrics write failed for {brand_id}: {e}")
+        prev = None
+
+    vis["month"] = cur_key
+    vis["prev_month"] = prev_key
+    vis["delta"] = (vis["score"] - prev["score"]) if prev and isinstance(prev.get("score"), int) else None
+    return {**report, "visibility": vis}
+
+
+_FIXABLE_CODES = (
+    "missing_title", "short_title", "long_title", "missing_meta_description",
+    "thin_content", "no_answer_paragraph", "no_citation_statistics", "no_faq_schema",
+)
+_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+@brands_router.get("/{brand_id}/quick-fixes")
+async def brand_quick_fixes(brand_id: str, user: dict = Depends(_server_get_current_user)):
+    """Top 3 highest-impact fixable issues for the project whose domain
+    matches this brand — reuses the project fix flow (FixModal)."""
+    srv = _server()
+    brand = await srv.db.brands.find_one({"id": brand_id, "user_id": user["id"]}, {"_id": 0})
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    domain = _normalize_domain(brand.get("domain") or "")
+    project = await srv.db.projects.find_one(
+        {"user_id": user["id"], "domain": {"$in": [domain, f"www.{domain}", f"https://{domain}", f"https://www.{domain}"]}},
+        {"_id": 0, "id": 1, "domain": 1},
+    )
+    if not project:
+        # fall back: match on normalized domain of any of the user's projects
+        async for p in srv.db.projects.find({"user_id": user["id"]}, {"_id": 0, "id": 1, "domain": 1}):
+            if _normalize_domain(p.get("domain") or "") == domain:
+                project = p
+                break
+    if not project:
+        return {"project_id": None, "fixes": []}
+
+    pages = await srv.db.project_pages.find(
+        {"project_id": project["id"]}, {"_id": 0, "url": 1, "issues": 1}
+    ).sort("seo_score", 1).to_list(50)
+
+    candidates = []
+    for pg in pages:
+        for iss in (pg.get("issues") or []):
+            if iss.get("code") in _FIXABLE_CODES:
+                candidates.append({
+                    "severity": iss.get("severity") or "medium",
+                    "page_url": pg.get("url") or "",
+                    "issue": {
+                        "code": iss.get("code"),
+                        "message": iss.get("message") or "",
+                        "fix": iss.get("fix") or "",
+                        "category": iss.get("category") or "",
+                    },
+                })
+    candidates.sort(key=lambda c: _SEVERITY_RANK.get(c["severity"], 1))
+    return {"project_id": project["id"], "fixes": candidates[:3]}
+
+
 @brands_router.post("/{brand_id}/scan")
 async def scan_brand(brand_id: str, user: dict = Depends(_server_get_current_user)):
     """Re-scan a brand: runs a fresh prompt-source + citations pull and
@@ -348,7 +474,7 @@ async def scan_brand(brand_id: str, user: dict = Depends(_server_get_current_use
         "report": report,
     }
     await srv.db.brand_reports.update_one({"brand_id": brand_id}, {"$set": doc}, upsert=True)
-    return report
+    return await _attach_visibility(brand_id, user["id"], report, brand)
 
 
 @brands_router.get("/{brand_id}/report")
@@ -362,11 +488,12 @@ async def get_brand_report(brand_id: str, user: dict = Depends(_server_get_curre
     if cached:
         age = time.time() - float(cached.get("cached_at", 0))
         if age < _SCAN_TTL_SECONDS and cached.get("report"):
-            return {**cached["report"], "from_cache": True, "cache_age_seconds": int(age)}
+            return await _attach_visibility(brand_id, user["id"],
+                {**cached["report"], "from_cache": True, "cache_age_seconds": int(age)}, brand)
     report = await _run_brand_scan(brand)
     await srv.db.brand_reports.update_one(
         {"brand_id": brand_id},
         {"$set": {"brand_id": brand_id, "user_id": user["id"], "cached_at": time.time(), "report": report}},
         upsert=True,
     )
-    return {**report, "from_cache": False, "cache_age_seconds": 0}
+    return await _attach_visibility(brand_id, user["id"], {**report, "from_cache": False, "cache_age_seconds": 0}, brand)

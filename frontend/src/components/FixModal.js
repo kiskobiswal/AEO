@@ -68,7 +68,7 @@ export function FixButton({ issue, projectId, pageUrl, onApplied }) {
   );
 }
 
-function FixModal({ issue, projectId, pageUrl, onClose, onApplied }) {
+export function FixModal({ issue, projectId, pageUrl, onClose, onApplied }) {
   const [stage, setStage] = useState("loading"); // loading | needs_conn | review | applying | applied | error
   const [error, setError] = useState("");
   const [needs, setNeeds] = useState(null);
