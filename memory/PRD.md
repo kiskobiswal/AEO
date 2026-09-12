@@ -16,6 +16,13 @@ Imported from GitHub `sayingbox/emergent_1st_project`.
 ## Admin credentials
 `admin@citetail.com` / `admin123` (see `/app/memory/test_credentials.md`).
 
+## Forgot Password (OTP)
+- Endpoints: `POST /api/auth/forgot-password/request | /verify | /reset`
+- Frontend: 3-step inline flow on the Sign-in page (Auth.js) — no separate route.
+- Email delivery: Resend. If `RESEND_API_KEY` is empty, OTPs are logged to
+  `/var/log/supervisor/backend.err.log` (dev fallback) — set the key in
+  `backend/.env` for real email delivery.
+
 ## Features Wired
 - Auth (login/register/me/logout), admin seed on startup
 - Projects (CRUD), Overview, Domain analysis, Visibility, Citations, Sentiment,
