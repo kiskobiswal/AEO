@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { http, formatApiErrorDetail } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,12 @@ import {
   Gauge,
   ListChecks,
   Lightbulb,
+  Save,
+  Trash2,
+  Edit3,
+  FileText,
+  RotateCw,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -190,10 +196,35 @@ export default function ContentWriter() {
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
 
+  // Drafts
+  const [drafts, setDrafts] = useState([]);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [currentDraftId, setCurrentDraftId] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [showDrafts, setShowDrafts] = useState(false);
+
+  // Inline editing (re-score without new LLM call)
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [rescoring, setRescoring] = useState(false);
+
   const kwList = useMemo(
     () => keywords.split(",").map((k) => k.trim()).filter(Boolean),
     [keywords]
   );
+
+  const loadDrafts = async () => {
+    setDraftsLoading(true);
+    try {
+      const { data } = await http.get("/content-writer/drafts");
+      setDrafts(Array.isArray(data) ? data : []);
+    } catch (e) {
+      // silent — user may not have any drafts
+    } finally {
+      setDraftsLoading(false);
+    }
+  };
+  useEffect(() => { loadDrafts(); }, []);
 
   const generate = async () => {
     if (!topic.trim()) {
@@ -202,6 +233,8 @@ export default function ContentWriter() {
     }
     setLoading(true);
     setResult(null);
+    setCurrentDraftId(null);
+    setEditing(false);
     try {
       const { data } = await http.post("/content-writer/generate", {
         topic: topic.trim(),
@@ -216,6 +249,115 @@ export default function ContentWriter() {
       toast.error(formatApiErrorDetail(e) || "Failed to generate content");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveDraft = async () => {
+    if (!result?.content) return;
+    setSaving(true);
+    try {
+      if (currentDraftId) {
+        const { data } = await http.patch(`/content-writer/drafts/${currentDraftId}`, {
+          topic: topic.trim() || result.title || "Untitled",
+          keywords: kwList,
+          content: result.content,
+          tone,
+          length,
+        });
+        setResult((r) => ({ ...r, ...data }));
+        toast.success("Draft updated");
+      } else {
+        const { data } = await http.post("/content-writer/drafts", {
+          title: result.title || topic.trim() || "Untitled",
+          topic: topic.trim() || result.title || "Untitled",
+          keywords: kwList,
+          content: result.content,
+          tone,
+          length,
+        });
+        setCurrentDraftId(data.id);
+        setResult((r) => ({ ...r, ...data }));
+        toast.success("Draft saved");
+      }
+      await loadDrafts();
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e) || "Failed to save draft");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const loadDraft = async (id) => {
+    try {
+      const { data } = await http.get(`/content-writer/drafts/${id}`);
+      setResult(data);
+      setCurrentDraftId(data.id);
+      setTopic(data.topic || "");
+      setKeywords((data.keywords || []).join(", "));
+      setTone(data.tone || "professional");
+      setLength(data.length || "medium");
+      setEditing(false);
+      setShowDrafts(false);
+      toast.success("Draft loaded");
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e) || "Failed to load draft");
+    }
+  };
+
+  const deleteDraft = async (id, evt) => {
+    if (evt) evt.stopPropagation();
+    if (!window.confirm("Delete this draft?")) return;
+    try {
+      await http.delete(`/content-writer/drafts/${id}`);
+      if (currentDraftId === id) {
+        setCurrentDraftId(null);
+      }
+      await loadDrafts();
+      toast.success("Draft deleted");
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e) || "Failed to delete draft");
+    }
+  };
+
+  const startEdit = () => {
+    setEditContent(result?.content || "");
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setEditContent("");
+  };
+  const applyRescore = async () => {
+    if (!editContent.trim()) {
+      toast.error("Content cannot be empty");
+      return;
+    }
+    setRescoring(true);
+    try {
+      const { data } = await http.post("/content-writer/score", {
+        content: editContent,
+        topic: topic.trim() || result?.title || "topic",
+        keywords: kwList,
+      });
+      setResult((r) => ({ ...(r || {}), ...data }));
+      setEditing(false);
+      toast.success("Re-scored");
+      // If this draft is already saved, persist the edit + scores server-side.
+      if (currentDraftId) {
+        try {
+          const { data: upd } = await http.patch(`/content-writer/drafts/${currentDraftId}`, {
+            content: editContent,
+            keywords: kwList,
+            topic: topic.trim() || result?.title || "topic",
+          });
+          setResult((r) => ({ ...r, ...upd }));
+          await loadDrafts();
+        } catch (_) { /* non-fatal */ }
+      }
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e) || "Re-score failed");
+    } finally {
+      setRescoring(false);
     }
   };
 
@@ -235,15 +377,84 @@ export default function ContentWriter() {
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto">
-      <div className="flex items-center gap-3 mb-1">
-        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500 text-white grid place-items-center shadow-md">
-          <PenSquare size={20} />
+      <div className="flex items-start justify-between gap-3 mb-1">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500 text-white grid place-items-center shadow-md">
+            <PenSquare size={20} />
+          </div>
+          <div>
+            <h1 className="text-2xl font-extrabold text-slate-900 leading-tight">Content Writer</h1>
+            <p className="text-sm text-slate-500">Generate SEO + AEO optimized content and see live scoring on the right.</p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-2xl font-extrabold text-slate-900 leading-tight">Content Writer</h1>
-          <p className="text-sm text-slate-500">Generate SEO + AEO optimized content and see live scoring on the right.</p>
-        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setShowDrafts((v) => !v)}
+          data-testid="cw-toggle-drafts"
+        >
+          <FileText size={14} className="mr-1.5" />
+          Drafts {drafts.length > 0 && <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold">{drafts.length}</span>}
+        </Button>
       </div>
+
+      {showDrafts && (
+        <Card className="mt-4 p-4" data-testid="cw-drafts-panel">
+          <div className="flex items-center justify-between mb-3">
+            <div className="font-bold text-slate-900">Saved drafts</div>
+            <button
+              onClick={() => setShowDrafts(false)}
+              className="text-slate-400 hover:text-slate-600"
+              aria-label="Close drafts"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          {draftsLoading ? (
+            <div className="py-6 text-center text-slate-400 text-sm"><Loader2 className="inline animate-spin mr-2" size={14} />Loading…</div>
+          ) : drafts.length === 0 ? (
+            <div className="py-6 text-center text-slate-400 text-sm">No saved drafts yet. Generate content and click <span className="font-semibold">Save draft</span> to keep it here.</div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-3">
+              {drafts.map((d) => (
+                <div
+                  key={d.id}
+                  onClick={() => loadDraft(d.id)}
+                  className={`group rounded-lg border p-3 cursor-pointer transition-all hover:border-indigo-300 hover:shadow-sm ${currentDraftId === d.id ? "border-indigo-400 bg-indigo-50/40" : "border-slate-200 bg-white"}`}
+                  data-testid={`cw-draft-item-${d.id}`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-semibold text-slate-900 text-[14px] truncate">{d.title || d.topic}</div>
+                      <div className="text-[11px] text-slate-400 truncate">
+                        {new Date(d.updated_at || d.created_at).toLocaleString()} · {d.word_count || 0} words
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => deleteDraft(d.id, e)}
+                      className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 opacity-0 group-hover:opacity-100 transition"
+                      title="Delete draft"
+                      data-testid={`cw-draft-delete-${d.id}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                  {d.preview && (
+                    <p className="mt-1.5 text-[12px] text-slate-500 line-clamp-2">{d.preview}</p>
+                  )}
+                  <div className="mt-2 flex items-center gap-3 text-[11px] font-semibold">
+                    <span className={scoreColor(d.scores?.overall || 0)}>Overall {d.scores?.overall || 0}</span>
+                    <span className="text-slate-300">·</span>
+                    <span className={scoreColor(d.scores?.seo || 0)}>SEO {d.scores?.seo || 0}</span>
+                    <span className="text-slate-300">·</span>
+                    <span className={scoreColor(d.scores?.aeo || 0)}>AEO {d.scores?.aeo || 0}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       <div className="grid lg:grid-cols-[1fr_360px] gap-6 mt-6">
         {/* LEFT — Input + Content */}
@@ -331,19 +542,65 @@ export default function ContentWriter() {
 
           {result && (
             <Card className="p-5">
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900">Generated content</h2>
-                  <div className="text-[12px] text-slate-500">
+              <div className="flex items-center justify-between mb-2 gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold text-slate-900 truncate">{editing ? "Editing content" : "Generated content"}</h2>
+                  <div className="text-[12px] text-slate-500 truncate">
                     {result.word_count} words · {result.title}
+                    {currentDraftId && <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[10px] font-bold">SAVED</span>}
                   </div>
                 </div>
-                <Button variant="outline" size="sm" onClick={copyContent} data-testid="cw-copy">
-                  {copied ? <Check size={14} className="mr-1.5" /> : <Copy size={14} className="mr-1.5" />}
-                  {copied ? "Copied" : "Copy markdown"}
-                </Button>
+                <div className="flex gap-2 flex-wrap">
+                  {editing ? (
+                    <>
+                      <Button variant="outline" size="sm" onClick={cancelEdit} data-testid="cw-cancel-edit">
+                        <X size={14} className="mr-1.5" />Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={applyRescore}
+                        disabled={rescoring}
+                        className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white"
+                        data-testid="cw-rescore"
+                      >
+                        {rescoring ? <Loader2 className="animate-spin mr-1.5" size={14} /> : <RotateCw size={14} className="mr-1.5" />}
+                        Re-score
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button variant="outline" size="sm" onClick={startEdit} data-testid="cw-edit">
+                        <Edit3 size={14} className="mr-1.5" />Edit
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={copyContent} data-testid="cw-copy">
+                        {copied ? <Check size={14} className="mr-1.5" /> : <Copy size={14} className="mr-1.5" />}
+                        {copied ? "Copied" : "Copy"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={saveDraft}
+                        disabled={saving}
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                        data-testid="cw-save-draft"
+                      >
+                        {saving ? <Loader2 className="animate-spin mr-1.5" size={14} /> : <Save size={14} className="mr-1.5" />}
+                        {currentDraftId ? "Update draft" : "Save draft"}
+                      </Button>
+                    </>
+                  )}
+                </div>
               </div>
-              <div className="prose max-w-none">{renderMd(result.content)}</div>
+              {editing ? (
+                <Textarea
+                  value={editContent}
+                  onChange={(e) => setEditContent(e.target.value)}
+                  rows={22}
+                  className="font-mono text-[13px] leading-relaxed"
+                  data-testid="cw-edit-textarea"
+                />
+              ) : (
+                <div className="prose max-w-none">{renderMd(result.content)}</div>
+              )}
             </Card>
           )}
 

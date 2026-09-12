@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -424,3 +425,165 @@ async def content_writer_score(payload: dict, user: dict = Depends(_auth_dep()))
     scored = _score_content(md, dummy)
     scored["content"] = md
     return scored
+
+
+# ---------- Drafts (save / list / update / delete) ----------
+def _db():
+    """Access the shared Mongo client from server module."""
+    from server import db  # noqa: WPS433
+    return db
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class DraftIn(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=300)
+    topic: str = Field(..., min_length=1, max_length=300)
+    keywords: List[str] = Field(default_factory=list)
+    content: str = Field(..., min_length=1)
+    tone: Optional[str] = None
+    length: Optional[str] = None
+
+
+class DraftUpdate(BaseModel):
+    title: Optional[str] = None
+    topic: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    content: Optional[str] = None
+    tone: Optional[str] = None
+    length: Optional[str] = None
+
+
+def _sanitize_draft(doc: dict) -> dict:
+    if not doc:
+        return doc
+    doc.pop("_id", None)
+    return doc
+
+
+def _preview(md: str, n: int = 220) -> str:
+    plain = _strip_markdown(md or "")
+    plain = re.sub(r"\s+", " ", plain).strip()
+    return plain[:n] + ("…" if len(plain) > n else "")
+
+
+@content_writer_router.post("/drafts")
+async def create_draft(body: DraftIn, user: dict = Depends(_auth_dep())):
+    """Persist a draft. Scores are recomputed server-side (no LLM call)."""
+    scored = _score_content(
+        body.content,
+        GenerateInput(
+            topic=body.topic or "topic",
+            keywords=body.keywords or [],
+            prompt=None,
+            tone=body.tone or "professional",
+            length=body.length or "medium",
+        ),
+    )
+    now = _now_iso()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": str(user.get("id") or user.get("_id") or ""),
+        "title": (body.title or scored.get("title") or body.topic).strip()[:300],
+        "topic": body.topic.strip(),
+        "keywords": [k.strip() for k in (body.keywords or []) if k and k.strip()],
+        "content": body.content,
+        "tone": body.tone or "professional",
+        "length": body.length or "medium",
+        "word_count": scored["word_count"],
+        "scores": scored["scores"],
+        "breakdown": scored["breakdown"],
+        "suggestions": scored["suggestions"],
+        "meta_description": scored.get("meta_description", ""),
+        "preview": _preview(body.content),
+        "created_at": now,
+        "updated_at": now,
+    }
+    await _db().content_drafts.insert_one(dict(doc))
+    return _sanitize_draft(doc)
+
+
+@content_writer_router.get("/drafts")
+async def list_drafts(user: dict = Depends(_auth_dep())):
+    """List the current user's drafts (lightweight — no full content)."""
+    uid = str(user.get("id") or user.get("_id") or "")
+    cursor = _db().content_drafts.find(
+        {"user_id": uid},
+        {
+            "_id": 0,
+            "id": 1,
+            "title": 1,
+            "topic": 1,
+            "keywords": 1,
+            "word_count": 1,
+            "scores": 1,
+            "preview": 1,
+            "created_at": 1,
+            "updated_at": 1,
+        },
+    ).sort("updated_at", -1).limit(200)
+    return [d async for d in cursor]
+
+
+@content_writer_router.get("/drafts/{draft_id}")
+async def get_draft(draft_id: str, user: dict = Depends(_auth_dep())):
+    uid = str(user.get("id") or user.get("_id") or "")
+    doc = await _db().content_drafts.find_one({"id": draft_id, "user_id": uid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return _sanitize_draft(doc)
+
+
+@content_writer_router.patch("/drafts/{draft_id}")
+async def update_draft(draft_id: str, body: DraftUpdate, user: dict = Depends(_auth_dep())):
+    """Update a draft. Re-scores server-side when content/keywords change (no LLM)."""
+    uid = str(user.get("id") or user.get("_id") or "")
+    existing = await _db().content_drafts.find_one({"id": draft_id, "user_id": uid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    patch: dict = {}
+    for field in ("title", "topic", "tone", "length"):
+        v = getattr(body, field)
+        if v is not None:
+            patch[field] = v
+    if body.keywords is not None:
+        patch["keywords"] = [k.strip() for k in body.keywords if k and k.strip()]
+    if body.content is not None:
+        patch["content"] = body.content
+        patch["preview"] = _preview(body.content)
+
+    # Re-score whenever content OR keywords change (no LLM used).
+    if "content" in patch or "keywords" in patch or "topic" in patch:
+        merged = {**existing, **patch}
+        scored = _score_content(
+            merged["content"],
+            GenerateInput(
+                topic=merged.get("topic") or "topic",
+                keywords=merged.get("keywords") or [],
+                prompt=None,
+                tone=merged.get("tone") or "professional",
+                length=merged.get("length") or "medium",
+            ),
+        )
+        patch["word_count"] = scored["word_count"]
+        patch["scores"] = scored["scores"]
+        patch["breakdown"] = scored["breakdown"]
+        patch["suggestions"] = scored["suggestions"]
+        patch["meta_description"] = scored.get("meta_description", "")
+
+    patch["updated_at"] = _now_iso()
+    await _db().content_drafts.update_one({"id": draft_id, "user_id": uid}, {"$set": patch})
+    updated = await _db().content_drafts.find_one({"id": draft_id, "user_id": uid})
+    return _sanitize_draft(updated)
+
+
+@content_writer_router.delete("/drafts/{draft_id}")
+async def delete_draft(draft_id: str, user: dict = Depends(_auth_dep())):
+    uid = str(user.get("id") or user.get("_id") or "")
+    res = await _db().content_drafts.delete_one({"id": draft_id, "user_id": uid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return {"ok": True}

@@ -3535,6 +3535,8 @@ async def startup():
         await db.site_connections.create_index([("user_id", 1), ("domain", 1)])
         await db.site_patches.create_index([("script_id", 1), ("status", 1)])
         await db.site_patches.create_index([("project_id", 1), ("created_at", -1)])
+        await db.content_drafts.create_index("id", unique=True)
+        await db.content_drafts.create_index([("user_id", 1), ("updated_at", -1)])
     except Exception:
         logger.exception("site-agent index creation failed (non-fatal)")
     logger.info("Startup complete")
