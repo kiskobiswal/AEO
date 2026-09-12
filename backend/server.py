@@ -480,6 +480,166 @@ async def me(user: dict = Depends(get_current_user)):
     return user
 
 
+# ---------------- Password reset (OTP) ----------------
+# Same "OTP by email" pattern used by admin_auth but scoped to regular users
+# and delivered to the requester's own email. RESEND_API_KEY missing → OTP
+# is written to the backend log so ops can still complete a reset.
+class ForgotPasswordRequestIn(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordVerifyIn(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=8)
+
+
+class ForgotPasswordResetIn(BaseModel):
+    email: EmailStr
+    reset_token: str
+    new_password: str = Field(min_length=6)
+
+
+_PWD_RESET_OTP_TTL_MIN = 10
+_PWD_RESET_TOKEN_TTL_MIN = 15
+_PWD_RESET_COOLDOWN_SEC = 60
+_PWD_RESET_MAX_ATTEMPTS = 5
+
+
+def _new_pwd_otp() -> str:
+    import secrets as _s
+    return f"{_s.randbelow(1000000):06d}"
+
+
+async def _send_pwd_reset_email(to_email: str, otp: str) -> None:
+    """Deliver OTP to the user's own inbox via Resend. Falls back to a
+    log line if RESEND_API_KEY is not configured (so dev/manual QA still works)."""
+    import asyncio as _asyncio
+    subject = "Citetail — Password reset code"
+    html = f"""
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:auto;padding:24px;color:#0f172a">
+      <h2 style="margin:0 0 8px">Password reset</h2>
+      <p style="margin:0 0 16px;color:#475569">Use the code below to reset your Citetail password. If you did not request this, ignore this email.</p>
+      <div style="background:#f1f5f9;border-radius:12px;padding:20px;text-align:center;margin:16px 0">
+        <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748b">Your code</div>
+        <div style="font-size:36px;font-weight:800;letter-spacing:.3em;margin-top:6px">{otp}</div>
+      </div>
+      <p style="font-size:12px;color:#64748b;margin:0">Valid for {_PWD_RESET_OTP_TTL_MIN} minutes. Do not share this code.</p>
+    </div>
+    """
+    resend_key = os.environ.get("RESEND_API_KEY", "")
+    if not resend_key:
+        logger.warning(f"[pwd-reset] RESEND_API_KEY missing — OTP for {to_email}: {otp}")
+        return
+    try:
+        import resend as _resend
+        _resend.api_key = resend_key
+        from_email = os.environ.get("OTP_FROM_EMAIL", "onboarding@resend.dev")
+        res = await _asyncio.to_thread(
+            _resend.Emails.send,
+            {"from": from_email, "to": [to_email], "subject": subject, "html": html},
+        )
+        logger.info(f"[pwd-reset] sent OTP to {to_email} (resend id={res.get('id') if isinstance(res, dict) else res})")
+    except Exception as e:
+        logger.error(f"[pwd-reset] resend failed: {e}. OTP for {to_email}: {otp}")
+
+
+@api_router.post("/auth/forgot-password/request")
+async def forgot_password_request(body: ForgotPasswordRequestIn):
+    """Step 1: user submits their email. Returns 404 with a clear message if
+    the email is not registered — the frontend surfaces this inline."""
+    email = body.email.lower().strip()
+    user = await db.users.find_one({"email": email}, {"_id": 1, "email": 1})
+    if not user:
+        raise HTTPException(status_code=404, detail="This email is not registered.")
+
+    now = datetime.now(timezone.utc)
+    existing = await db.password_reset_otps.find_one({"email": email})
+    if existing:
+        last_sent = existing.get("last_sent_at")
+        if isinstance(last_sent, datetime):
+            if last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=timezone.utc)
+            elapsed = (now - last_sent).total_seconds()
+            if elapsed < _PWD_RESET_COOLDOWN_SEC:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Please wait {int(_PWD_RESET_COOLDOWN_SEC - elapsed)}s before requesting another code",
+                )
+
+    otp = _new_pwd_otp()
+    await db.password_reset_otps.update_one(
+        {"email": email},
+        {"$set": {
+            "email": email,
+            "code_hash": hash_password(otp),
+            "expires_at": now + timedelta(minutes=_PWD_RESET_OTP_TTL_MIN),
+            "last_sent_at": now,
+            "attempts": 0,
+            "verified": False,
+        }},
+        upsert=True,
+    )
+    await _send_pwd_reset_email(email, otp)
+    return {"ok": True, "delivered_to": email, "expires_in": _PWD_RESET_OTP_TTL_MIN * 60}
+
+
+@api_router.post("/auth/forgot-password/verify")
+async def forgot_password_verify(body: ForgotPasswordVerifyIn):
+    """Step 2: exchange OTP for a short-lived reset token (JWT)."""
+    email = body.email.lower().strip()
+    doc = await db.password_reset_otps.find_one({"email": email})
+    if not doc:
+        raise HTTPException(status_code=400, detail="Please request a new code")
+    exp = doc.get("expires_at")
+    if isinstance(exp, datetime) and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if not isinstance(exp, datetime) or exp < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Code expired — request a new one")
+    if int(doc.get("attempts", 0)) >= _PWD_RESET_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many attempts — request a new code")
+    if not verify_password(body.code.strip(), doc.get("code_hash", "")):
+        await db.password_reset_otps.update_one({"email": email}, {"$inc": {"attempts": 1}})
+        raise HTTPException(status_code=400, detail="Invalid code")
+
+    await db.password_reset_otps.update_one({"email": email}, {"$set": {"verified": True}})
+    token = jwt.encode(
+        {"sub": email, "purpose": "pwd_reset",
+         "exp": datetime.now(timezone.utc) + timedelta(minutes=_PWD_RESET_TOKEN_TTL_MIN)},
+        get_jwt_secret(), algorithm=JWT_ALGORITHM,
+    )
+    return {"ok": True, "reset_token": token, "expires_in": _PWD_RESET_TOKEN_TTL_MIN * 60}
+
+
+@api_router.post("/auth/forgot-password/reset")
+async def forgot_password_reset(body: ForgotPasswordResetIn):
+    """Step 3: consume the reset token and set a new password."""
+    email = body.email.lower().strip()
+    try:
+        payload = jwt.decode(body.reset_token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="Reset link expired — start over")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+    if payload.get("purpose") != "pwd_reset" or (payload.get("sub") or "").lower() != email:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+
+    doc = await db.password_reset_otps.find_one({"email": email})
+    if not doc or not doc.get("verified"):
+        raise HTTPException(status_code=400, detail="Please verify the code first")
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="This email is not registered.")
+
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password_hash": hash_password(body.new_password),
+                  "password_set_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    await db.password_reset_otps.delete_one({"email": email})
+    return {"ok": True}
+
+
 # ---------------- Analysis endpoints ----------------
 def summary_of(doc: dict) -> dict:
     return {"id": doc["id"], "title": doc["title"], "source_url": doc.get("source_url"),
