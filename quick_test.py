@@ -3,7 +3,7 @@
 import requests
 import time
 
-BACKEND_URL = "https://emergent-import-13.preview.emergentagent.com/api"
+BACKEND_URL = "https://github-auto-runner.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@citetail.com"
 ADMIN_PASSWORD = "admin123"
 
