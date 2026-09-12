@@ -22,6 +22,7 @@ import BrandConsistency from "@/pages/BrandConsistency";
 import PRCoverage from "@/pages/PRCoverage";
 import SentimentAnalysis from "@/pages/SentimentAnalysis";
 import AiAgent from "@/pages/AiAgent";
+import ContentWriter from "@/pages/ContentWriter";
 import Optimizer from "@/pages/Dashboard";
 import AnalysisDetail from "@/pages/AnalysisDetail";
 import History from "@/pages/History";
@@ -113,6 +114,7 @@ function App() {
 
               {/* AEO / Assistant */}
               <Route path="/app/optimizer" element={<Protected><BrandGate><Optimizer /></BrandGate></Protected>} />
+              <Route path="/app/content-writer" element={<Protected><BrandGate><ContentWriter /></BrandGate></Protected>} />
               <Route path="/app/agent" element={<Protected><BrandGate><AiAgent /></BrandGate></Protected>} />
               <Route path="/app/history" element={<Protected><BrandGate><History /></BrandGate></Protected>} />
               <Route path="/app/analysis/:id" element={<Protected><BrandGate><AnalysisDetail /></BrandGate></Protected>} />

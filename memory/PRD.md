@@ -19,7 +19,13 @@ Imported from GitHub `sayingbox/emergent_1st_project`.
 ## Features Wired
 - Auth (login/register/me/logout), admin seed on startup
 - Projects (CRUD), Overview, Domain analysis, Visibility, Citations, Sentiment,
-  Reddit, Brand consistency, PR coverage, AI Agent, Optimizer, History, Analysis detail
+  Reddit, Brand consistency, PR coverage, Optimizer, History, Analysis detail
+- Content Writer (NEW): generates SEO/AEO-optimized markdown via a single
+  cheap LLM call (openai/gpt-4o-mini). Scores (SEO, AEO, Readability, Overall)
+  + per-metric breakdown are computed heuristically in Python — zero extra
+  LLM credits per re-score. Route: `/app/content-writer`, endpoints:
+  `POST /api/content-writer/generate` and `POST /api/content-writer/score`.
+- AI Agent removed from sidebar (route still mounted at /app/agent for legacy).
 - Project dashboard extras: Distribution by LLM + By Country (audit insights),
   6 competitors, Citation Opportunities tab (TinyFish community/forum/Q&A search),
   Reviews tab (TinyFish ratings across G2/Capterra/Trustpilot/TrustRadius/ProductHunt/

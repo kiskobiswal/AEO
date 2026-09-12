@@ -3499,6 +3499,9 @@ app.include_router(_razorpay_webhook_router, prefix="/api")
 from brands import brands_router as _brands_router  # noqa: E402
 app.include_router(_brands_router)
 
+from content_writer import content_writer_router as _content_writer_router  # noqa: E402
+app.include_router(_content_writer_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,

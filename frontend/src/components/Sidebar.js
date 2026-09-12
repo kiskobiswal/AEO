@@ -5,7 +5,7 @@ import { useBrand, faviconUrl } from "@/context/BrandContext";
 import { http } from "@/lib/api";
 import {
   Globe, Link2, MessageSquare, FileText, LogOut, Heart, Bot, ShieldCheck, Newspaper, Lock,
-  LayoutDashboard, ChevronDown, Plus, Check, CheckCircle2, Radar, FolderKanban,
+  LayoutDashboard, ChevronDown, Plus, Check, CheckCircle2, Radar, FolderKanban, PenSquare,
 } from "lucide-react";
 
 /**
@@ -52,12 +52,7 @@ const GROUPS = [
     label: "AEO",
     items: [
       { to: "/app/optimizer", label: "Content Optimizer", icon: FileText, feature: "aeo" },
-    ],
-  },
-  {
-    label: "Assistant",
-    items: [
-      { to: "/app/agent", label: "AI Agent", icon: Bot, badgeKey: "alerts", feature: "agent" },
+      { to: "/app/content-writer", label: "Content Writer", icon: PenSquare, feature: "aeo" },
     ],
   },
 ];
