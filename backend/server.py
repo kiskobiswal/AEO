@@ -1255,16 +1255,18 @@ async def _store_attribution(cache_key: str, provider_urls: dict):
 # Which live web-search providers each AI engine grounds its answers on. We infer
 # real per-engine citation by checking whether a source URL actually surfaces in
 # that provider's live search results for the (brand, query):
-#   • Serper.dev = Google Search index → Google-family / Bing-overlap engines
-#   • Tavily     = independent AI answer-search index → answer engines
+#   • Serper.dev = Google Search index → Gemini, Perplexity, Copilot, Google AI Overview
+#   • Tavily     = independent AI answer-search index → ChatGPT, Grok, Claude
+# Cost model: exactly ONE Serper call + ONE Tavily call per (brand, query),
+# then cached 24h so repeat scans make ZERO further API calls.
 ENGINE_GROUNDING = {
     "gemini":     {"serper"},
     "google_ai":  {"serper"},
-    "chatgpt":    {"serper", "tavily"},
-    "copilot":    {"serper", "tavily"},
-    "perplexity": {"tavily", "serper"},
+    "perplexity": {"serper"},
+    "copilot":    {"serper"},
+    "chatgpt":    {"tavily"},
+    "grok":       {"tavily"},
     "claude":     {"tavily"},
-    "grok":       {"tavily", "serper"},
 }
 ATTR_ENGINES = list(ENGINE_GROUNDING.keys())
 
@@ -1303,12 +1305,13 @@ async def real_engine_attribution(brand: str, query: str, urls: list,
         if cached and cached.get("provider_urls"):
             provider_urls = cached["provider_urls"]
         else:
-            # ONE call per submission: Serper first; Tavily only if Serper is empty.
-            # Never runs both concurrently — keeps external API usage minimal.
-            serper_res = await tf._serper_search(q, "web", 20)
-            tavily_res = []
-            if not serper_res:
-                tavily_res = await tf._tavily_search(q, "web", 20)
+            # Cost cap: exactly ONE Serper call + ONE Tavily call per (brand, query),
+            # run concurrently. Result is cached 24h so repeat scans are free.
+            serper_res, tavily_res = await asyncio.gather(
+                tf._serper_search(q, "web", 20),
+                tf._tavily_search(q, "web", 20),
+                return_exceptions=False,
+            )
             provider_urls = {
                 "serper": [r.get("url", "") for r in (serper_res or []) if r.get("url")],
                 "tavily": [r.get("url", "") for r in (tavily_res or []) if r.get("url")],
