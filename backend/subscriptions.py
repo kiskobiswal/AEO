@@ -61,13 +61,13 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "price_usd": 49.0,
         "project_limit": 1,
         "prompt_limit": 20,
-        "features": [FEATURE_DOMAIN, FEATURE_AEO, FEATURE_AGENT],
+        "features": [FEATURE_VISIBILITY, FEATURE_CITATIONS, FEATURE_AEO],
         "tagline": "Solo founders shipping their first AI-visible page",
         "highlights": [
-            "1 project",
-            "Domain Analysis",
-            "Answer Engine Optimizer (AEO)",
-            "AI Agent (chat assistant)",
+            "1 project (Site Audit)",
+            "Up to 20 prompts tracked",
+            "Citations tracking",
+            "Answer Engine Optimizer (AEO) — Content Optimizer & Content Writer",
         ],
     },
     "growth": {

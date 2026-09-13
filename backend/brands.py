@@ -461,11 +461,14 @@ async def brand_quick_fixes(brand_id: str, user: dict = Depends(_server_get_curr
 @brands_router.post("/{brand_id}/scan")
 async def scan_brand(brand_id: str, user: dict = Depends(_server_get_current_user)):
     """Re-scan a brand: runs a fresh prompt-source + citations pull and
-    caches the result in `brand_reports`. Real API calls only — no LLM."""
+    caches the result in `brand_reports`. Real API calls only — no LLM.
+    Enforces the once-per-UTC-day rescan cap for non-admin users."""
     srv = _server()
     brand = await srv.db.brands.find_one({"id": brand_id, "user_id": user["id"]}, {"_id": 0})
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
+    from rescan_throttle import enforce_daily_rescan
+    await enforce_daily_rescan(srv.db, user, "brand", brand_id)
     report = await _run_brand_scan(brand)
     doc = {
         "brand_id": brand_id,

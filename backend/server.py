@@ -3208,6 +3208,9 @@ async def rescan_project(project_id: str, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Project not found")
     if doc.get("status") == "processing":
         return {"id": project_id, "status": "processing", "domain": doc["domain"]}
+    # Daily rescan cap (once per UTC day per project for non-admin users)
+    from rescan_throttle import enforce_daily_rescan
+    await enforce_daily_rescan(db, user, "project", project_id)
     await db.projects.update_one({"id": project_id}, {"$set": {
         "status": "processing", "updated_at": datetime.now(timezone.utc).isoformat(), "error": None,
     }})
@@ -3675,6 +3678,12 @@ async def startup():
         await db.pending_signups.create_index("expires_at", expireAfterSeconds=86400)
     except Exception:
         logger.exception("pending_signups index creation failed (non-fatal)")
+    # Compound index for the daily rescan throttle.
+    try:
+        from rescan_throttle import ensure_indexes as _ensure_throttle_idx
+        await _ensure_throttle_idx(db)
+    except Exception:
+        logger.exception("rescan_throttle index creation failed (non-fatal)")
     # Site-agent lookups by script_id must be fast (called on every page-load ping).
     try:
         await db.site_connections.create_index("script_id", unique=True)
