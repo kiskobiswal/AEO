@@ -62,7 +62,14 @@ def apply_entitlements(user: dict) -> dict:
         user["entitlements"] = None
     return user
 
-app = FastAPI()
+# Disable interactive API docs / OpenAPI schema in production so we don't
+# leak the full endpoint surface. Set EXPOSE_DOCS=1 in staging/dev only.
+_expose_docs = os.environ.get("EXPOSE_DOCS", "").lower() in ("1", "true", "yes")
+app = FastAPI(
+    docs_url="/docs" if _expose_docs else None,
+    redoc_url="/redoc" if _expose_docs else None,
+    openapi_url="/openapi.json" if _expose_docs else None,
+)
 api_router = APIRouter(prefix="/api")
 
 
@@ -444,8 +451,18 @@ Each dimension must have 2-4 sub_checks. Provide 5-10 recommendations prioritize
 
 
 # ---------------- Auth endpoints ----------------
+# Rate limits (per client IP, sliding window):
+#  * auth:   5 sensitive attempts / 60s (login + password change + email verify)
+#  * signup: 3 create-account attempts / 60s
+#  * otp:    3 code-request attempts / 60s (server-side cooldown is 60s)
+from security import rate_limit as _rl  # noqa: E402
+_RL_AUTH = _rl("auth", 5, 60)
+_RL_SIGNUP = _rl("signup", 3, 60)
+_RL_OTP = _rl("otp", 3, 60)
+
+
 @api_router.post("/auth/register")
-async def register(body: RegisterInput, response: Response):
+async def register(body: RegisterInput, response: Response, _rl: None = Depends(_RL_SIGNUP)):
     email = body.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -458,7 +475,7 @@ async def register(body: RegisterInput, response: Response):
 
 
 @api_router.post("/auth/login")
-async def login(body: LoginInput, response: Response):
+async def login(body: LoginInput, response: Response, _rl: None = Depends(_RL_AUTH)):
     email = body.email.lower()
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
@@ -555,7 +572,7 @@ async def _send_pwd_reset_email(to_email: str, otp: str) -> None:
 
 
 @api_router.post("/auth/forgot-password/request")
-async def forgot_password_request(body: ForgotPasswordRequestIn):
+async def forgot_password_request(body: ForgotPasswordRequestIn, _rl: None = Depends(_RL_OTP)):
     """Step 1: user submits their email. Returns 404 with a clear message if
     the email is not registered — the frontend surfaces this inline."""
     email = body.email.lower().strip()
@@ -595,7 +612,7 @@ async def forgot_password_request(body: ForgotPasswordRequestIn):
 
 
 @api_router.post("/auth/forgot-password/verify")
-async def forgot_password_verify(body: ForgotPasswordVerifyIn):
+async def forgot_password_verify(body: ForgotPasswordVerifyIn, _rl: None = Depends(_RL_AUTH)):
     """Step 2: exchange OTP for a short-lived reset token (JWT)."""
     email = body.email.lower().strip()
     doc = await db.password_reset_otps.find_one({"email": email})
@@ -622,7 +639,7 @@ async def forgot_password_verify(body: ForgotPasswordVerifyIn):
 
 
 @api_router.post("/auth/forgot-password/reset")
-async def forgot_password_reset(body: ForgotPasswordResetIn):
+async def forgot_password_reset(body: ForgotPasswordResetIn, _rl: None = Depends(_RL_AUTH)):
     """Step 3: consume the reset token and set a new password."""
     email = body.email.lower().strip()
     try:
@@ -693,7 +710,7 @@ async def _send_signup_verify_email(to_email: str, otp: str) -> None:
 
 
 @api_router.post("/auth/signup/request")
-async def signup_request(body: SignupRequestIn):
+async def signup_request(body: SignupRequestIn, _rl: None = Depends(_RL_OTP)):
     """Step 1: submit name/email/password. If the email is not already used,
     stage a pending signup and email the user a 6-digit code. Idempotent —
     calling again within the cooldown returns 429; after the cooldown it
@@ -735,7 +752,7 @@ async def signup_request(body: SignupRequestIn):
 
 
 @api_router.post("/auth/signup/verify")
-async def signup_verify(body: SignupVerifyIn, response: Response):
+async def signup_verify(body: SignupVerifyIn, response: Response, _rl: None = Depends(_RL_AUTH)):
     """Step 2: exchange OTP for a real user account + auto-login cookies."""
     email = body.email.lower().strip()
     doc = await db.pending_signups.find_one({"email": email})
@@ -3651,13 +3668,20 @@ app.include_router(_brands_router)
 from content_writer import content_writer_router as _content_writer_router  # noqa: E402
 app.include_router(_content_writer_router)
 
+from security import parse_cors_origins as _parse_cors, safe_500_handler as _safe_500  # noqa: E402
+_cors_origins = _parse_cors()
+_use_wildcard = _cors_origins == ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=[os.environ.get('FRONTEND_URL', 'http://localhost:3000')],
+    # allow_credentials with wildcard is invalid per CORS spec — browsers will
+    # reject it. Toggle off credentials only if we're stuck on wildcard.
+    allow_credentials=not _use_wildcard,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Redact unexpected 500s so stack traces / internal details never leak.
+app.add_exception_handler(Exception, _safe_500)
 
 
 @app.on_event("startup")
