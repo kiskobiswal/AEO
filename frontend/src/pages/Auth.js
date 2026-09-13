@@ -468,11 +468,6 @@ export default function Auth() {
           {mode === MODES.LOGIN && (
             <p className="text-sm text-muted-foreground mt-6">
               New here? <a className="font-semibold text-[#129E75] underline underline-offset-4" href="/pricing" data-testid="link-pricing">See plans &amp; sign up</a>
-              <span className="mx-2 text-slate-300">·</span>
-              <button type="button" className="font-semibold text-[#6366F1] underline underline-offset-4"
-                onClick={() => setMode(MODES.REGISTER)} data-testid="toggle-register">
-                Create a free account
-              </button>
             </p>
           )}
           {mode === MODES.REGISTER && (
