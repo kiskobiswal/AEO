@@ -1941,12 +1941,16 @@ async def visibility_prompt_sources(body: dict, user: dict = Depends(get_current
             return {"prompt": prompt, "sources": cached, "cached": True}
 
         # 1) Real web search results for this exact prompt (0 LLM credit).
-        # ONE Serper call per submission — reused for BOTH source discovery
-        # AND per-engine attribution below. Tavily fallback only if Serper empty.
-        serper_res = await tf._serper_search(prompt, "web", 12)
-        tavily_res = []
-        if not serper_res:
-            tavily_res = await tf._tavily_search(prompt, "web", 10)
+        # Cost cap: ONE Serper call + ONE Tavily call per prompt, run
+        # concurrently. Serper feeds Gemini/Perplexity/Copilot/Google-AI-Overview
+        # attribution; Tavily feeds ChatGPT/Grok/Claude. Both must run so every
+        # engine has real grounding data. Results are cached for 24h so repeat
+        # expansions of the same prompt cost 0 API credits.
+        serper_res, tavily_res = await asyncio.gather(
+            tf._serper_search(prompt, "web", 12),
+            tf._tavily_search(prompt, "web", 12),
+            return_exceptions=False,
+        )
         seen_hosts, sources = set(), []
         for r, dt in [(x, "web") for x in serper_res] + [(x, "web") for x in tavily_res]:
             url = r.get("url", "")
@@ -2094,13 +2098,16 @@ async def citations(body: CitationInput, user: dict = Depends(get_current_user))
         if dom.startswith("www."):
             dom = dom[4:]
 
-    # 1) REAL search first — ONE Serper call per submission (Tavily fallback
-    #    only if Serper returns nothing). Every URL is a real search result,
-    #    then HTTP-verified live. Zero LLM credits, zero TinyFish credits.
-    serper_res = await tf._serper_search(query, "web", 25)
-    tavily_res = []
-    if not serper_res:
-        tavily_res = await tf._tavily_search(query, "web", 20)
+    # 1) REAL search first — ONE Serper call + ONE Tavily call per submission,
+    #    run concurrently. Serper grounds Gemini/Perplexity/Copilot/Google AI
+    #    Overview attribution; Tavily grounds ChatGPT/Grok/Claude. Both are
+    #    needed so every engine gets real citation data. Every URL is a real
+    #    search result, then HTTP-verified live. Zero LLM credits.
+    serper_res, tavily_res = await asyncio.gather(
+        tf._serper_search(query, "web", 25),
+        tf._tavily_search(query, "web", 25),
+        return_exceptions=False,
+    )
     seen_hosts, sources = set(), []
     for r, dt in [(x, "web") for x in serper_res] + [(x, "web") for x in tavily_res]:
         url = r.get("url", "")

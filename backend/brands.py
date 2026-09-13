@@ -182,12 +182,16 @@ async def _run_prompt_scan(brand_name: str, brand_domain: str, competitors: list
     """
     srv = _server()
     tf = srv.tf
-    # --- 1) Real web results (Serper preferred, Tavily fallback) — same code
-    # path used by /api/visibility/prompt-sources.
-    serper_res = await tf._serper_search(prompt, "web", 12)
-    tavily_res = []
-    if not serper_res:
-        tavily_res = await tf._tavily_search(prompt, "web", 10)
+    # --- 1) Real web results — ONE Serper call + ONE Tavily call per prompt,
+    # run concurrently. Serper grounds Gemini/Perplexity/Copilot/Google AI
+    # Overview; Tavily grounds ChatGPT/Grok/Claude. Both must run so every
+    # engine has real citation data. Same pattern as
+    # /api/visibility/prompt-sources.
+    serper_res, tavily_res = await asyncio.gather(
+        tf._serper_search(prompt, "web", 12),
+        tf._tavily_search(prompt, "web", 12),
+        return_exceptions=False,
+    )
 
     seen_hosts, sources = set(), []
     for r in list(serper_res) + list(tavily_res):
