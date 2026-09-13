@@ -135,6 +135,17 @@ class RegisterInput(BaseModel):
     name: str = "User"
 
 
+class SignupRequestIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+    name: str = "User"
+
+
+class SignupVerifyIn(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=8)
+
+
 class LoginInput(BaseModel):
     email: EmailStr
     password: str
@@ -638,6 +649,131 @@ async def forgot_password_reset(body: ForgotPasswordResetIn):
     )
     await db.password_reset_otps.delete_one({"email": email})
     return {"ok": True}
+
+
+# ---------------- Signup verification (OTP) ----------------
+# New account creation now requires email verification via OTP. We stage the
+# pending signup (name + bcrypt hash + OTP hash) in a separate collection so
+# no `users` row is created until the code is confirmed. `RESEND_API_KEY`
+# absent → OTP is written to the backend log so manual QA still works.
+_SIGNUP_OTP_TTL_MIN = 10
+_SIGNUP_COOLDOWN_SEC = 60
+_SIGNUP_MAX_ATTEMPTS = 5
+
+
+async def _send_signup_verify_email(to_email: str, otp: str) -> None:
+    import asyncio as _asyncio
+    subject = "Citetail — Verify your email"
+    html = f"""
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:auto;padding:24px;color:#0f172a">
+      <h2 style="margin:0 0 8px">Verify your email</h2>
+      <p style="margin:0 0 16px;color:#475569">Welcome to Citetail! Use the code below to confirm your email and finish creating your account.</p>
+      <div style="background:#f1f5f9;border-radius:12px;padding:20px;text-align:center;margin:16px 0">
+        <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748b">Your code</div>
+        <div style="font-size:36px;font-weight:800;letter-spacing:.3em;margin-top:6px">{otp}</div>
+      </div>
+      <p style="font-size:12px;color:#64748b;margin:0">Valid for {_SIGNUP_OTP_TTL_MIN} minutes. Do not share this code.</p>
+    </div>
+    """
+    resend_key = os.environ.get("RESEND_API_KEY", "")
+    if not resend_key:
+        logger.warning(f"[signup-verify] RESEND_API_KEY missing — OTP for {to_email}: {otp}")
+        return
+    try:
+        import resend as _resend
+        _resend.api_key = resend_key
+        from_email = os.environ.get("OTP_FROM_EMAIL", "onboarding@resend.dev")
+        res = await _asyncio.to_thread(
+            _resend.Emails.send,
+            {"from": from_email, "to": [to_email], "subject": subject, "html": html},
+        )
+        logger.info(f"[signup-verify] sent OTP to {to_email} (resend id={res.get('id') if isinstance(res, dict) else res})")
+    except Exception as e:
+        logger.error(f"[signup-verify] resend failed: {e}. OTP for {to_email}: {otp}")
+
+
+@api_router.post("/auth/signup/request")
+async def signup_request(body: SignupRequestIn):
+    """Step 1: submit name/email/password. If the email is not already used,
+    stage a pending signup and email the user a 6-digit code. Idempotent —
+    calling again within the cooldown returns 429; after the cooldown it
+    updates the pending record with a fresh OTP."""
+    email = body.email.lower().strip()
+    if await db.users.find_one({"email": email}, {"_id": 1}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    now = datetime.now(timezone.utc)
+    existing = await db.pending_signups.find_one({"email": email})
+    if existing:
+        last_sent = existing.get("last_sent_at")
+        if isinstance(last_sent, datetime):
+            if last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=timezone.utc)
+            elapsed = (now - last_sent).total_seconds()
+            if elapsed < _SIGNUP_COOLDOWN_SEC:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Please wait {int(_SIGNUP_COOLDOWN_SEC - elapsed)}s before requesting another code",
+                )
+
+    otp = _new_pwd_otp()  # reuse 6-digit generator
+    await db.pending_signups.update_one(
+        {"email": email},
+        {"$set": {
+            "email": email,
+            "name": body.name or "User",
+            "password_hash": hash_password(body.password),
+            "code_hash": hash_password(otp),
+            "expires_at": now + timedelta(minutes=_SIGNUP_OTP_TTL_MIN),
+            "last_sent_at": now,
+            "attempts": 0,
+        }},
+        upsert=True,
+    )
+    await _send_signup_verify_email(email, otp)
+    return {"ok": True, "delivered_to": email, "expires_in": _SIGNUP_OTP_TTL_MIN * 60}
+
+
+@api_router.post("/auth/signup/verify")
+async def signup_verify(body: SignupVerifyIn, response: Response):
+    """Step 2: exchange OTP for a real user account + auto-login cookies."""
+    email = body.email.lower().strip()
+    doc = await db.pending_signups.find_one({"email": email})
+    if not doc:
+        raise HTTPException(status_code=400, detail="Please request a new code")
+    exp = doc.get("expires_at")
+    if isinstance(exp, datetime) and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if not isinstance(exp, datetime) or exp < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Code expired — request a new one")
+    if int(doc.get("attempts", 0)) >= _SIGNUP_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many attempts — request a new code")
+    if not verify_password(body.code.strip(), doc.get("code_hash", "")):
+        await db.pending_signups.update_one({"email": email}, {"$inc": {"attempts": 1}})
+        raise HTTPException(status_code=400, detail="Invalid code")
+
+    # Guard against a race where the email was registered between /request and /verify.
+    if await db.users.find_one({"email": email}, {"_id": 1}):
+        await db.pending_signups.delete_one({"email": email})
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    name = doc.get("name") or "User"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    user_doc = {
+        "email": email,
+        "password_hash": doc["password_hash"],
+        "name": name,
+        "role": "user",
+        "created_at": now_iso,
+        "email_verified": True,
+        "email_verified_at": now_iso,
+    }
+    res = await db.users.insert_one(user_doc)
+    uid = str(res.inserted_id)
+    await db.pending_signups.delete_one({"email": email})
+
+    set_auth_cookies(response, create_access_token(uid, email), create_refresh_token(uid))
+    return apply_entitlements({"id": uid, "email": email, "name": name, "role": "user"})
 
 
 # ---------------- Analysis endpoints ----------------
@@ -3529,6 +3665,13 @@ async def startup():
         }})
     # Ensure TTL index for admin OTPs
     await db.admin_otps.create_index("expires_at", expireAfterSeconds=0)
+    # TTL index for pending signup OTPs — expire records automatically 24h
+    # after `expires_at` so stale rows don't accumulate.
+    try:
+        await db.pending_signups.create_index("email", unique=True)
+        await db.pending_signups.create_index("expires_at", expireAfterSeconds=86400)
+    except Exception:
+        logger.exception("pending_signups index creation failed (non-fatal)")
     # Site-agent lookups by script_id must be fast (called on every page-load ping).
     try:
         await db.site_connections.create_index("script_id", unique=True)

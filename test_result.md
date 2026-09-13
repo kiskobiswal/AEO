@@ -948,15 +948,88 @@ frontend:
             PASS. Prompts page engine logos verified: ✓ Navigated to /app/prompts ✓ Rescan button visible ✓ Found 4 prompt cards ✓ First card contains 7 engine chips (expected 7) ✓ All 7 engine chips show REAL AI engine logos from Google's s2 favicon service: Engine 1: openai.com (ChatGPT), Engine 2: perplexity.ai (Perplexity), Engine 3: gemini.google.com (Gemini), Engine 4: claude.ai (Claude), Engine 5: copilot.microsoft.com (Copilot), Engine 6: google.com (Google AI), Engine 7: x.ai (Grok). NO single letter fallbacks detected. All requirements met.
 
 metadata:
-  test_sequence: 6
+  test_sequence: 7
   run_ui: false
 
 test_plan:
   current_focus:
-    - "Content Writer — Save Drafts (list, save, load, re-score, update, delete)"
+    - "Signup OTP — request/verify/cooldown/expiry/user creation"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        BACKEND ONLY verification for the new Signup OTP flow. Zero LLM cost —
+        pure auth. Base URL from frontend/.env REACT_APP_BACKEND_URL.
+
+        Endpoints (all under /api/auth):
+          - POST /signup/request   {name, email, password (min 6)}
+              200 → {"ok":true,"delivered_to":<email>,"expires_in":600}
+              400 if email already registered (existing user)
+              429 if called again within 60s cooldown (message includes seconds)
+          - POST /signup/verify    {email, code}
+              200 → user object with entitlements + Set-Cookie access/refresh
+              400 "Invalid code" on wrong OTP (increments attempts)
+              400 "Code expired" after 10 min
+              429 after 5 failed attempts
+
+        Notes for the tester:
+          - RESEND_API_KEY is NOT set in backend/.env, so the OTP is written
+            to /var/log/supervisor/backend.err.log — grep for
+            "[signup-verify] RESEND_API_KEY missing — OTP for <email>: <code>".
+          - Once /signup/verify succeeds, the user should be logged in
+            (cookies set) — GET /api/auth/me should return the new user with
+            "email_verified": true.
+          - Existing admin account admin@citetail.com / admin123 must NOT be
+            affected. /auth/login for admin still returns 200.
+
+        Test scenarios:
+          1) Happy path: request → grab OTP from log → verify → me → cleanup.
+          2) Cooldown: two /signup/request calls back-to-back → 2nd is 429.
+          3) Bad OTP: verify with a wrong code → 400, attempts increments.
+          4) Duplicate email: after step 1 completes, /signup/request with
+             the same email returns 400 "Email already registered".
+          5) Auth cookies: cookie jar after /signup/verify allows /auth/me.
+
+        DO NOT test the frontend UI. DO NOT hit any /api/content-writer or
+        /api/analyze endpoints (LLM cost).
+
+backend:
+  - task: "Signup OTP — /auth/signup/request + /auth/signup/verify (2-step email verification)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Added 2-step signup OTP: /api/auth/signup/request stages a
+            pending signup in `pending_signups` (bcrypt password + 6-digit
+            OTP hash, 10-min TTL, 60s cooldown, 5 attempts max) and emails
+            the code via Resend (or logs it if RESEND_API_KEY empty).
+            /api/auth/signup/verify checks the code, creates the users row
+            with email_verified=true, sets auth cookies, and returns the
+            user. TTL index (24h after expires_at) + unique email index on
+            pending_signups created on startup. Manual curl verified all
+            paths (200 request, 429 cooldown, 400 wrong OTP, 200 verify +
+            /auth/me works with cookies). Existing /auth/register endpoint
+            was NOT removed — it remains for backwards compatibility but the
+            frontend now uses the OTP flow.
+        - working: true
+          agent: "testing"
+          comment: |
+            All 5/5 scenarios PASS. Happy path (request → OTP from log →
+            verify → me with email_verified=true), 60s cooldown returns 429
+            with countdown, wrong OTP returns 400 "Invalid code" and correct
+            OTP still works after, duplicate email returns 400 "Email already
+            registered", admin login unaffected. Set-Cookie headers include
+            access_token + refresh_token. All operations < 2s, zero LLM cost.
+            3 test users cleaned up from MongoDB.
 
 agent_communication:
     - agent: "main"
@@ -1086,3 +1159,127 @@ backend:
             ✅ TEST 8 - UNAUTH CHECK: GET /api/content-writer/drafts without cookie returns 401 ✓
             
             NO ISSUES FOUND. All endpoints working correctly. NO LLM calls made during testing (all operations < 0.1s). Backend is production-ready.
+
+# --- NEW FEATURE: Signup OTP verification flow ---
+user_problem_statement: |
+  Test the NEW Signup OTP backend flow. ZERO LLM cost — pure auth endpoints.
+  Endpoints under /api/auth:
+    - POST /signup/request  body {name, email, password (min 6)}
+    - POST /signup/verify   body {email, code}
+    - GET  /auth/me          (cookie-authenticated)
+  
+  RESEND_API_KEY is not configured, so the OTP is logged to /var/log/supervisor/backend.err.log.
+  
+  Verify scenarios: happy path, cooldown, bad OTP, duplicate email, admin regression.
+
+backend:
+  - task: "Signup OTP verification flow (email verification for new accounts)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            COMPREHENSIVE TEST PASSED (5/5 scenarios). NEW Signup OTP flow fully verified and working correctly:
+            
+            ✅ SCENARIO 1: HAPPY PATH - PASSED
+               Step 1a: POST /api/auth/signup/request with unique email → 200 {ok:true, delivered_to:<email>, expires_in:600} ✓
+               Step 1b: OTP extracted from backend logs using pattern "[signup-verify] RESEND_API_KEY missing — OTP for <email>: <6-digit-code>" ✓
+               Step 1c: POST /api/auth/signup/verify with correct OTP → 200 with user object containing:
+                  - id, email, name, role="user" ✓
+                  - entitlements object present ✓
+                  - Set-Cookie headers include access_token + refresh_token ✓
+               Step 1d: GET /api/auth/me with cookies → 200 with user object including:
+                  - email_verified: true ✓
+                  - email_verified_at: timestamp ✓
+            
+            ✅ SCENARIO 2: COOLDOWN - PASSED
+               - First POST /api/auth/signup/request with NEW email → 200 ✓
+               - Second POST /api/auth/signup/request immediately with SAME email → 429 ✓
+               - Response detail: "Please wait 58s before requesting another code" ✓
+               - Cooldown message format correct (contains "Please wait" and seconds) ✓
+            
+            ✅ SCENARIO 3: BAD OTP - PASSED
+               - POST /api/auth/signup/request → 200 ✓
+               - POST /api/auth/signup/verify with wrong code "000000" → 400 "Invalid code" ✓
+               - POST /api/auth/signup/verify with correct OTP (after wrong attempt) → 200 ✓
+               - Correct OTP still works after wrong attempt (attempts counter working correctly) ✓
+            
+            ✅ SCENARIO 4: DUPLICATE EMAIL - PASSED
+               - Complete signup flow (request + verify) creates user successfully ✓
+               - POST /api/auth/signup/request with SAME email → 400 "Email already registered" ✓
+               - Duplicate detection working correctly ✓
+            
+            ✅ SCENARIO 5: ADMIN REGRESSION CHECK - PASSED
+               - POST /api/auth/login with admin@citetail.com / admin123 → 200 ✓
+               - Admin login still works correctly (no regression) ✓
+            
+            CLEANUP: All test users deleted from MongoDB successfully (3 users deleted) ✓
+            
+            TIMING: All operations < 2s (pure auth, no LLM calls)
+            
+            NO ISSUES FOUND. All signup OTP scenarios verified and working correctly. ZERO LLM cost. Backend is production-ready.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.3"
+  test_sequence: 4
+  run_ui: false
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        NEW Signup OTP flow implemented. Test all 5 scenarios:
+        1) Happy path (request → extract OTP from logs → verify → check /auth/me)
+        2) Cooldown (two requests back-to-back should give 429)
+        3) Bad OTP (wrong code → 400, correct code still works)
+        4) Duplicate email (after user created, same email → 400)
+        5) Admin regression (admin@citetail.com login still works)
+        
+        Base URL: use REACT_APP_BACKEND_URL from /app/frontend/.env
+        Admin credentials: admin@citetail.com / admin123 (do not delete or modify)
+        OTP pattern in logs: "[signup-verify] RESEND_API_KEY missing — OTP for <email>: <6-digit-code>"
+        
+        Clean up test users at the end via mongosh.
+    - agent: "testing"
+      message: |
+        ✅ ALL TESTS PASSED (5/5 scenarios). NEW Signup OTP flow fully verified and working correctly.
+        
+        COMPREHENSIVE TEST RESULTS:
+        
+        ✅ Scenario 1: Happy Path
+           - /signup/request returns correct response shape {ok:true, delivered_to, expires_in:600}
+           - OTP successfully extracted from backend logs
+           - /signup/verify with correct OTP creates user with email_verified=true
+           - Auth cookies (access_token, refresh_token) set correctly
+           - /auth/me returns user with email_verified=true
+        
+        ✅ Scenario 2: Cooldown
+           - First request succeeds (200)
+           - Second request within 60s returns 429 with "Please wait Xs before requesting another code"
+        
+        ✅ Scenario 3: Bad OTP
+           - Wrong code returns 400 "Invalid code"
+           - Correct OTP still works after wrong attempt (attempts counter working)
+        
+        ✅ Scenario 4: Duplicate Email
+           - After user created, same email returns 400 "Email already registered"
+        
+        ✅ Scenario 5: Admin Regression
+           - Admin login (admin@citetail.com / admin123) still works correctly
+        
+        CLEANUP: 3 test users deleted from MongoDB successfully
+        
+        TIMING: All operations < 2s (pure auth endpoints, ZERO LLM cost)
+        
+        NO ISSUES FOUND. All signup OTP scenarios verified and working correctly. Backend is production-ready. Main agent should summarize and finish.

@@ -12,6 +12,7 @@ import { toast } from "sonner";
 const MODES = {
   LOGIN: "login",
   REGISTER: "register",
+  REGISTER_OTP: "register-otp",
   FORGOT_EMAIL: "forgot-email",
   FORGOT_OTP: "forgot-otp",
   FORGOT_NEW: "forgot-new",
@@ -33,10 +34,18 @@ export default function Auth() {
   const [cooldown, setCooldown] = useState(0);
   const cooldownRef = useRef(null);
 
-  const { login, register } = useAuth();
+  // Signup OTP state
+  const [signupOtp, setSignupOtp] = useState("");
+  const [signupCooldown, setSignupCooldown] = useState(0);
+  const signupCooldownRef = useRef(null);
+
+  const { login, signupRequest, signupVerify } = useAuth();
   const navigate = useNavigate();
 
-  useEffect(() => () => { if (cooldownRef.current) clearInterval(cooldownRef.current); }, []);
+  useEffect(() => () => {
+    if (cooldownRef.current) clearInterval(cooldownRef.current);
+    if (signupCooldownRef.current) clearInterval(signupCooldownRef.current);
+  }, []);
 
   const startCooldown = (seconds) => {
     setCooldown(seconds);
@@ -44,6 +53,17 @@ export default function Auth() {
     cooldownRef.current = setInterval(() => {
       setCooldown((s) => {
         if (s <= 1) { clearInterval(cooldownRef.current); return 0; }
+        return s - 1;
+      });
+    }, 1000);
+  };
+
+  const startSignupCooldown = (seconds) => {
+    setSignupCooldown(seconds);
+    if (signupCooldownRef.current) clearInterval(signupCooldownRef.current);
+    signupCooldownRef.current = setInterval(() => {
+      setSignupCooldown((s) => {
+        if (s <= 1) { clearInterval(signupCooldownRef.current); return 0; }
         return s - 1;
       });
     }, 1000);
@@ -58,22 +78,71 @@ export default function Auth() {
     if (cooldownRef.current) clearInterval(cooldownRef.current);
   };
 
-  const goLogin = () => { resetForgotState(); setMode(MODES.LOGIN); };
+  const resetSignupState = () => {
+    setSignupOtp("");
+    setSignupCooldown(0);
+    if (signupCooldownRef.current) clearInterval(signupCooldownRef.current);
+  };
+
+  const goLogin = () => { resetForgotState(); resetSignupState(); setMode(MODES.LOGIN); };
 
   const submitLoginOrRegister = async (e) => {
     e.preventDefault();
     setLoading(true);
-    const res = mode === MODES.LOGIN
-      ? await login(email, password, remember)
-      : await register(name, email, password);
+    if (mode === MODES.LOGIN) {
+      const res = await login(email, password, remember);
+      setLoading(false);
+      if (res.ok) {
+        toast.success("Welcome back");
+        const ent = res.user?.entitlements;
+        const admin = res.user?.full_access;
+        if (!admin && ent && !ent.is_active) navigate("/app/upgrade");
+        else navigate("/app");
+      } else toast.error(res.error);
+      return;
+    }
+    // REGISTER — send OTP first
+    const res = await signupRequest(name, email, password);
     setLoading(false);
     if (res.ok) {
-      toast.success(mode === MODES.LOGIN ? "Welcome back" : "Account created");
+      toast.success(`Verification code sent to ${email}`);
+      setSignupOtp("");
+      startSignupCooldown(60);
+      setMode(MODES.REGISTER_OTP);
+    } else {
+      toast.error(res.error);
+    }
+  };
+
+  const resendSignupOtp = async () => {
+    if (signupCooldown > 0) return;
+    setLoading(true);
+    const res = await signupRequest(name, email, password);
+    setLoading(false);
+    if (res.ok) {
+      toast.success("A new code has been sent");
+      startSignupCooldown(60);
+    } else {
+      toast.error(res.error);
+    }
+  };
+
+  const verifySignupOtp = async (e) => {
+    e.preventDefault();
+    if (!/^\d{4,8}$/.test(signupOtp.trim())) { toast.error("Enter the code you received"); return; }
+    setLoading(true);
+    const res = await signupVerify(email.trim().toLowerCase(), signupOtp.trim());
+    setLoading(false);
+    if (res.ok) {
+      toast.success("Email verified — welcome to Citetail");
+      resetSignupState();
       const ent = res.user?.entitlements;
       const admin = res.user?.full_access;
       if (!admin && ent && !ent.is_active) navigate("/app/upgrade");
       else navigate("/app");
-    } else toast.error(res.error);
+    } else {
+      toast.error(res.error);
+    }
   };
 
   const requestOtp = async (e) => {
@@ -158,6 +227,7 @@ export default function Auth() {
   const headerTitle = {
     [MODES.LOGIN]: "Sign in",
     [MODES.REGISTER]: "Create account",
+    [MODES.REGISTER_OTP]: "Verify your email",
     [MODES.FORGOT_EMAIL]: "Reset password",
     [MODES.FORGOT_OTP]: "Enter verification code",
     [MODES.FORGOT_NEW]: "Set a new password",
@@ -166,6 +236,7 @@ export default function Auth() {
   const headerSub = {
     [MODES.LOGIN]: "Access your analyses and score history.",
     [MODES.REGISTER]: "Start scoring content in seconds.",
+    [MODES.REGISTER_OTP]: `We sent a 6-digit code to ${email || "your inbox"}. It expires in 10 minutes.`,
     [MODES.FORGOT_EMAIL]: "Enter your email and we'll send you a one-time code.",
     [MODES.FORGOT_OTP]: `We sent a 6-digit code to ${email || "your inbox"}. It expires in 10 minutes.`,
     [MODES.FORGOT_NEW]: "Choose a strong password (min 8 characters).",
@@ -202,7 +273,7 @@ export default function Auth() {
             <span className="font-head font-extrabold text-xl tracking-tight">Cite<span className="text-[#6366F1]">tail</span></span>
           </div>
 
-          {(mode === MODES.FORGOT_EMAIL || mode === MODES.FORGOT_OTP || mode === MODES.FORGOT_NEW) && (
+          {(mode === MODES.FORGOT_EMAIL || mode === MODES.FORGOT_OTP || mode === MODES.FORGOT_NEW || mode === MODES.REGISTER_OTP) && (
             <button
               type="button"
               onClick={goLogin}
@@ -252,8 +323,45 @@ export default function Auth() {
                 </label>
               )}
               <Button type="submit" disabled={loading} className="w-full btn-brand transition-all" data-testid="auth-submit">
-                {loading ? "Please wait…" : mode === MODES.LOGIN ? "Sign in" : "Create account"}
+                {loading ? "Please wait…" : mode === MODES.LOGIN ? "Sign in" : "Continue"}
               </Button>
+            </form>
+          )}
+
+          {/* SIGNUP OTP */}
+          {mode === MODES.REGISTER_OTP && (
+            <form onSubmit={verifySignupOtp} className="space-y-4" data-testid="signup-otp-form">
+              <div>
+                <Label className="mb-1.5 block">Verification code</Label>
+                <div className="relative">
+                  <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <Input
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    required
+                    value={signupOtp}
+                    onChange={(e) => setSignupOtp(e.target.value.replace(/[^0-9]/g, "").slice(0, 8))}
+                    placeholder="123456"
+                    className="pl-9 tracking-[0.4em] font-mono text-center"
+                    data-testid="signup-otp-input"
+                  />
+                </div>
+              </div>
+              <Button type="submit" disabled={loading || signupOtp.trim().length < 4} className="w-full btn-brand" data-testid="signup-verify-btn">
+                {loading ? <Loader2 className="animate-spin mr-2" size={16} /> : null}
+                {loading ? "Verifying…" : "Verify & create account"}
+              </Button>
+              <div className="text-center text-sm">
+                <button
+                  type="button"
+                  onClick={resendSignupOtp}
+                  disabled={signupCooldown > 0 || loading}
+                  className="text-[#6366F1] font-semibold disabled:opacity-40 disabled:cursor-not-allowed hover:underline"
+                  data-testid="signup-resend-btn"
+                >
+                  {signupCooldown > 0 ? `Resend code in ${signupCooldown}s` : "Resend code"}
+                </button>
+              </div>
             </form>
           )}
 
@@ -360,6 +468,11 @@ export default function Auth() {
           {mode === MODES.LOGIN && (
             <p className="text-sm text-muted-foreground mt-6">
               New here? <a className="font-semibold text-[#129E75] underline underline-offset-4" href="/pricing" data-testid="link-pricing">See plans &amp; sign up</a>
+              <span className="mx-2 text-slate-300">·</span>
+              <button type="button" className="font-semibold text-[#6366F1] underline underline-offset-4"
+                onClick={() => setMode(MODES.REGISTER)} data-testid="toggle-register">
+                Create a free account
+              </button>
             </p>
           )}
           {mode === MODES.REGISTER && (

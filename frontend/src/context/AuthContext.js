@@ -105,6 +105,27 @@ export function AuthProvider({ children }) {
     }
   };
 
+  // OTP-based signup: request a code (stages the pending account), then verify
+  // to create the user record and receive auth cookies.
+  const signupRequest = async (name, email, password) => {
+    try {
+      const { data } = await http.post("/auth/signup/request", { name, email, password });
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: formatApiErrorDetail(e.response?.data?.detail) || e.message };
+    }
+  };
+
+  const signupVerify = async (email, code) => {
+    try {
+      const { data } = await http.post("/auth/signup/verify", { email, code });
+      setUser(data);
+      return { ok: true, user: data };
+    } catch (e) {
+      return { ok: false, error: formatApiErrorDetail(e.response?.data?.detail) || e.message };
+    }
+  };
+
   const logout = async () => {
     await http.post("/auth/logout").catch(() => {});
     clearPersistedSession();
@@ -123,7 +144,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, ready, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, ready, login, register, signupRequest, signupVerify, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

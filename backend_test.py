@@ -1,562 +1,407 @@
 #!/usr/bin/env python3
-"""Backend test for Content Writer "Save Drafts" feature.
-
-Tests all CRUD endpoints for drafts WITHOUT calling /generate (no LLM credits).
 """
-
-import requests
+Backend test for NEW Signup OTP flow.
+Tests all scenarios: happy path, cooldown, bad OTP, duplicate email, admin regression.
+"""
+import os
+import sys
 import time
-import json
-from typing import Optional
+import re
+import requests
+import subprocess
+from datetime import datetime
 
 # Base URL from frontend/.env
-BASE_URL = "https://7d678d72-ad72-4e34-a228-c69cd1e57561.preview.emergentagent.com"
-API_BASE = f"{BASE_URL}/api"
+BASE_URL = "https://github-auto-runner.preview.emergentagent.com/api"
 
-# Test credentials from /app/memory/test_credentials.md
+# Test credentials
 ADMIN_EMAIL = "admin@citetail.com"
 ADMIN_PASSWORD = "admin123"
 
-# Sample draft content (safe, no LLM call)
-SAMPLE_DRAFT = {
-    "title": "AEO basics",
-    "topic": "AEO basics",
-    "keywords": ["AEO", "GEO"],
-    "content": """# AEO basics
-META: A short guide about AEO for testing.
-TL;DR: AEO helps AI engines cite your content.
+# Track test users for cleanup
+test_users = []
 
-## What is AEO?
-AEO stands for Answer Engine Optimization.
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-- Concise answers
-- Structured content
+def get_otp_from_logs(email):
+    """Extract OTP from backend logs for the given email."""
+    log(f"Extracting OTP for {email} from backend logs...")
+    try:
+        result = subprocess.run(
+            ["tail", "-n", "200", "/var/log/supervisor/backend.err.log"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        # Pattern: [signup-verify] RESEND_API_KEY missing — OTP for <email>: <6-digit-code>
+        pattern = rf"\[signup-verify\] RESEND_API_KEY missing — OTP for {re.escape(email)}: (\d{{6}})"
+        matches = re.findall(pattern, result.stdout)
+        if matches:
+            otp = matches[-1]  # Get the most recent OTP
+            log(f"✓ Found OTP: {otp}")
+            return otp
+        else:
+            log(f"✗ No OTP found in logs for {email}")
+            log(f"Log output (last 50 lines):\n{result.stdout[-2000:]}")
+            return None
+    except Exception as e:
+        log(f"✗ Error reading logs: {e}")
+        return None
 
-## Frequently Asked Questions
-### Q: Why does AEO matter?
-AEO matters because AI answers are the new SERP.
-
-## Key Takeaways
-- Direct answers win
-- Use FAQs"""
-}
-
-# Longer content for PATCH test
-UPDATED_CONTENT = """# AEO basics - Extended Edition
-META: A comprehensive guide about AEO for testing with more content.
-TL;DR: AEO helps AI engines cite your content by optimizing for answer engines.
-
-## What is AEO?
-AEO stands for Answer Engine Optimization. It's the practice of optimizing content for AI-powered search engines like ChatGPT, Perplexity, Claude, and Google AI Overviews.
-
-- Concise answers that AI can extract
-- Structured content with clear headings
-- Direct answers to common questions
-- Use of schema markup
-
-## Why AEO Matters
-AI-powered search is changing how people find information. Traditional SEO focused on ranking in search results, but AEO focuses on being cited by AI engines.
-
-## Best Practices for AEO
-1. Start with a direct answer (TL;DR)
-2. Use question-style headings
-3. Include FAQ sections
-4. Keep paragraphs short and scannable
-5. Add structured data markup
-
-## Frequently Asked Questions
-### Q: Why does AEO matter?
-AEO matters because AI answers are the new SERP. When users ask questions to AI assistants, they get direct answers instead of a list of links.
-
-### Q: How is AEO different from SEO?
-While SEO optimizes for search engine rankings, AEO optimizes for being cited and quoted by AI engines in their responses.
-
-### Q: What are the key elements of AEO?
-Key elements include direct answers, structured content, FAQ sections, and content that AI can easily extract and cite.
-
-## Key Takeaways
-- Direct answers win in AI search
-- Use FAQs to cover common questions
-- Structure content for easy extraction
-- AEO complements traditional SEO
-- Focus on being quotable and citable"""
-
-
-class TestResult:
-    def __init__(self):
-        self.passed = []
-        self.failed = []
-        self.warnings = []
+def test_scenario_1_happy_path():
+    """Scenario 1: Happy path - request OTP, verify, check /auth/me"""
+    log("\n" + "="*80)
+    log("SCENARIO 1: HAPPY PATH")
+    log("="*80)
     
-    def add_pass(self, test_name: str, detail: str = ""):
-        self.passed.append(f"✅ {test_name}" + (f": {detail}" if detail else ""))
+    # Use unique email with timestamp
+    email = f"test_{int(time.time())}@example.com"
+    test_users.append(email)
     
-    def add_fail(self, test_name: str, detail: str):
-        self.failed.append(f"❌ {test_name}: {detail}")
+    # Step 1a: POST /signup/request
+    log(f"\nStep 1a: POST /auth/signup/request with email={email}")
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/request",
+        json={"name": "Test User", "email": email, "password": "test123456"}
+    )
+    log(f"Status: {resp.status_code}")
+    log(f"Response: {resp.json()}")
     
-    def add_warning(self, test_name: str, detail: str):
-        self.warnings.append(f"⚠️  {test_name}: {detail}")
+    if resp.status_code != 200:
+        log(f"✗ FAIL: Expected 200, got {resp.status_code}")
+        return False
     
-    def print_summary(self):
-        print("\n" + "="*80)
-        print("TEST SUMMARY")
-        print("="*80)
-        
-        if self.failed:
-            print("\n❌ FAILED TESTS:")
-            for f in self.failed:
-                print(f"  {f}")
-        
-        if self.warnings:
-            print("\n⚠️  WARNINGS:")
-            for w in self.warnings:
-                print(f"  {w}")
-        
-        if self.passed:
-            print("\n✅ PASSED TESTS:")
-            for p in self.passed:
-                print(f"  {p}")
-        
-        print("\n" + "="*80)
-        print(f"Total: {len(self.passed)} passed, {len(self.failed)} failed, {len(self.warnings)} warnings")
-        print("="*80 + "\n")
+    data = resp.json()
+    if not (data.get("ok") and data.get("delivered_to") == email and data.get("expires_in") == 600):
+        log(f"✗ FAIL: Response shape incorrect. Expected {{ok:true, delivered_to:{email}, expires_in:600}}")
+        return False
+    
+    log("✓ PASS: /signup/request returned correct response")
+    
+    # Step 1b: Extract OTP from logs
+    log("\nStep 1b: Extract OTP from backend logs")
+    time.sleep(1)  # Give logs time to flush
+    otp = get_otp_from_logs(email)
+    if not otp:
+        log("✗ FAIL: Could not extract OTP from logs")
+        return False
+    
+    # Step 1c: POST /signup/verify with correct OTP
+    log(f"\nStep 1c: POST /auth/signup/verify with email={email}, code={otp}")
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/verify",
+        json={"email": email, "code": otp}
+    )
+    log(f"Status: {resp.status_code}")
+    log(f"Response: {resp.json()}")
+    
+    if resp.status_code != 200:
+        log(f"✗ FAIL: Expected 200, got {resp.status_code}")
+        return False
+    
+    user = resp.json()
+    if not all(k in user for k in ["id", "email", "name", "role", "entitlements"]):
+        log(f"✗ FAIL: User object missing required fields")
+        return False
+    
+    if user["email"] != email or user["role"] != "user":
+        log(f"✗ FAIL: User email or role incorrect")
+        return False
+    
+    # Check cookies
+    cookies = resp.cookies
+    if "access_token" not in cookies or "refresh_token" not in cookies:
+        log(f"✗ FAIL: Missing auth cookies")
+        return False
+    
+    log("✓ PASS: /signup/verify returned user object with correct fields and cookies")
+    
+    # Step 1d: GET /auth/me with cookies
+    log("\nStep 1d: GET /auth/me with session cookies")
+    resp = requests.get(f"{BASE_URL}/auth/me", cookies=cookies)
+    log(f"Status: {resp.status_code}")
+    log(f"Response: {resp.json()}")
+    
+    if resp.status_code != 200:
+        log(f"✗ FAIL: Expected 200, got {resp.status_code}")
+        return False
+    
+    me = resp.json()
+    if me.get("email") != email or me.get("email_verified") != True:
+        log(f"✗ FAIL: /auth/me response incorrect. Expected email_verified=true")
+        return False
+    
+    log("✓ PASS: /auth/me returned user with email_verified=true")
+    log("\n✅ SCENARIO 1: PASSED")
+    return True
 
+def test_scenario_2_cooldown():
+    """Scenario 2: Cooldown - two requests back-to-back should give 429"""
+    log("\n" + "="*80)
+    log("SCENARIO 2: COOLDOWN")
+    log("="*80)
+    
+    email = f"test_{int(time.time())}_cooldown@example.com"
+    test_users.append(email)
+    
+    # First request
+    log(f"\nFirst request: POST /auth/signup/request with email={email}")
+    resp1 = requests.post(
+        f"{BASE_URL}/auth/signup/request",
+        json={"name": "Test User", "email": email, "password": "test123456"}
+    )
+    log(f"Status: {resp1.status_code}")
+    log(f"Response: {resp1.json()}")
+    
+    if resp1.status_code != 200:
+        log(f"✗ FAIL: First request should return 200, got {resp1.status_code}")
+        return False
+    
+    log("✓ First request successful")
+    
+    # Second request immediately
+    log(f"\nSecond request (immediate): POST /auth/signup/request with same email")
+    resp2 = requests.post(
+        f"{BASE_URL}/auth/signup/request",
+        json={"name": "Test User", "email": email, "password": "test123456"}
+    )
+    log(f"Status: {resp2.status_code}")
+    log(f"Response: {resp2.json()}")
+    
+    if resp2.status_code != 429:
+        log(f"✗ FAIL: Expected 429 (cooldown), got {resp2.status_code}")
+        return False
+    
+    detail = resp2.json().get("detail", "")
+    if "Please wait" not in detail or "s before" not in detail:
+        log(f"✗ FAIL: Expected cooldown message with 'Please wait' and seconds, got: {detail}")
+        return False
+    
+    log(f"✓ PASS: Second request returned 429 with cooldown message: {detail}")
+    log("\n✅ SCENARIO 2: PASSED")
+    return True
 
-def login() -> Optional[requests.Session]:
-    """Login and return session with cookies."""
-    print(f"\n[TEST 1] Auth - POST /api/auth/login")
-    session = requests.Session()
+def test_scenario_3_bad_otp():
+    """Scenario 3: Bad OTP - wrong code should give 400, correct code should still work"""
+    log("\n" + "="*80)
+    log("SCENARIO 3: BAD OTP")
+    log("="*80)
+    
+    email = f"test_{int(time.time())}_badotp@example.com"
+    test_users.append(email)
+    
+    # Request OTP
+    log(f"\nStep 1: POST /auth/signup/request with email={email}")
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/request",
+        json={"name": "Test User", "email": email, "password": "test123456"}
+    )
+    log(f"Status: {resp.status_code}")
+    
+    if resp.status_code != 200:
+        log(f"✗ FAIL: signup/request failed with {resp.status_code}")
+        return False
+    
+    # Try wrong OTP
+    log(f"\nStep 2: POST /auth/signup/verify with WRONG code (000000)")
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/verify",
+        json={"email": email, "code": "000000"}
+    )
+    log(f"Status: {resp.status_code}")
+    log(f"Response: {resp.json()}")
+    
+    if resp.status_code != 400:
+        log(f"✗ FAIL: Expected 400 for wrong OTP, got {resp.status_code}")
+        return False
+    
+    detail = resp.json().get("detail", "")
+    if "Invalid code" not in detail:
+        log(f"✗ FAIL: Expected 'Invalid code' message, got: {detail}")
+        return False
+    
+    log("✓ PASS: Wrong OTP returned 400 with 'Invalid code'")
+    
+    # Get correct OTP and verify
+    log(f"\nStep 3: Extract correct OTP and verify")
+    time.sleep(1)
+    otp = get_otp_from_logs(email)
+    if not otp:
+        log("✗ FAIL: Could not extract OTP from logs")
+        return False
+    
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/verify",
+        json={"email": email, "code": otp}
+    )
+    log(f"Status: {resp.status_code}")
+    
+    if resp.status_code != 200:
+        log(f"✗ FAIL: Correct OTP should work after wrong attempt, got {resp.status_code}")
+        log(f"Response: {resp.json()}")
+        return False
+    
+    log("✓ PASS: Correct OTP still works after wrong attempt")
+    log("\n✅ SCENARIO 3: PASSED")
+    return True
+
+def test_scenario_4_duplicate_email():
+    """Scenario 4: Duplicate email - after user created, same email should give 400"""
+    log("\n" + "="*80)
+    log("SCENARIO 4: DUPLICATE EMAIL")
+    log("="*80)
+    
+    email = f"test_{int(time.time())}_dup@example.com"
+    test_users.append(email)
+    
+    # Create user (full flow)
+    log(f"\nStep 1: Create user with email={email}")
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/request",
+        json={"name": "Test User", "email": email, "password": "test123456"}
+    )
+    if resp.status_code != 200:
+        log(f"✗ FAIL: signup/request failed with {resp.status_code}")
+        return False
+    
+    time.sleep(1)
+    otp = get_otp_from_logs(email)
+    if not otp:
+        log("✗ FAIL: Could not extract OTP")
+        return False
+    
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/verify",
+        json={"email": email, "code": otp}
+    )
+    if resp.status_code != 200:
+        log(f"✗ FAIL: signup/verify failed with {resp.status_code}")
+        return False
+    
+    log("✓ User created successfully")
+    
+    # Try to request OTP again with same email
+    log(f"\nStep 2: POST /auth/signup/request with SAME email (should fail)")
+    resp = requests.post(
+        f"{BASE_URL}/auth/signup/request",
+        json={"name": "Test User", "email": email, "password": "test123456"}
+    )
+    log(f"Status: {resp.status_code}")
+    log(f"Response: {resp.json()}")
+    
+    if resp.status_code != 400:
+        log(f"✗ FAIL: Expected 400 for duplicate email, got {resp.status_code}")
+        return False
+    
+    detail = resp.json().get("detail", "")
+    if "Email already registered" not in detail:
+        log(f"✗ FAIL: Expected 'Email already registered' message, got: {detail}")
+        return False
+    
+    log("✓ PASS: Duplicate email returned 400 with 'Email already registered'")
+    log("\n✅ SCENARIO 4: PASSED")
+    return True
+
+def test_scenario_5_admin_regression():
+    """Scenario 5: Admin regression - admin login should still work"""
+    log("\n" + "="*80)
+    log("SCENARIO 5: ADMIN REGRESSION CHECK")
+    log("="*80)
+    
+    log(f"\nPOST /auth/login with admin@citetail.com / admin123")
+    resp = requests.post(
+        f"{BASE_URL}/auth/login",
+        json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
+    )
+    log(f"Status: {resp.status_code}")
+    
+    if resp.status_code != 200:
+        log(f"✗ FAIL: Admin login failed with {resp.status_code}")
+        log(f"Response: {resp.json()}")
+        return False
+    
+    user = resp.json()
+    if user.get("email") != ADMIN_EMAIL:
+        log(f"✗ FAIL: Admin email incorrect")
+        return False
+    
+    log(f"✓ PASS: Admin login still works correctly")
+    log("\n✅ SCENARIO 5: PASSED")
+    return True
+
+def cleanup_test_users():
+    """Delete test users from MongoDB"""
+    log("\n" + "="*80)
+    log("CLEANUP: Deleting test users")
+    log("="*80)
+    
+    if not test_users:
+        log("No test users to clean up")
+        return
     
     try:
-        resp = session.post(
-            f"{API_BASE}/auth/login",
-            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+        # Build mongosh command to delete test users
+        emails_str = ", ".join([f'"{email}"' for email in test_users])
+        mongo_cmd = f'db.users.deleteMany({{email: {{$in: [{emails_str}]}}}});'
+        
+        log(f"Deleting {len(test_users)} test users from MongoDB...")
+        result = subprocess.run(
+            ["mongosh", "mongodb://localhost:27017/test_database", "--quiet", "--eval", mongo_cmd],
+            capture_output=True,
+            text=True,
             timeout=10
         )
         
-        if resp.status_code != 200:
-            print(f"❌ Login failed: {resp.status_code} - {resp.text[:200]}")
-            return None
-        
-        data = resp.json()
-        print(f"✅ Login successful: {data.get('email')}")
-        print(f"   Cookies: {list(session.cookies.keys())}")
-        return session
-    
+        log(f"MongoDB output: {result.stdout}")
+        if result.returncode == 0:
+            log(f"✓ Test users deleted successfully")
+        else:
+            log(f"⚠ Warning: MongoDB cleanup may have failed: {result.stderr}")
     except Exception as e:
-        print(f"❌ Login exception: {e}")
-        return None
-
-
-def test_create_draft(session: requests.Session, result: TestResult) -> Optional[str]:
-    """Test POST /api/content-writer/drafts"""
-    print(f"\n[TEST 2] POST /api/content-writer/drafts - Create draft")
-    
-    try:
-        start = time.time()
-        resp = session.post(
-            f"{API_BASE}/content-writer/drafts",
-            json=SAMPLE_DRAFT,
-            timeout=15
-        )
-        elapsed = time.time() - start
-        
-        if resp.status_code != 200:
-            result.add_fail("Create draft", f"Status {resp.status_code}: {resp.text[:300]}")
-            return None
-        
-        data = resp.json()
-        
-        # Verify response shape
-        required_fields = ["id", "title", "content", "word_count", "scores", "breakdown", "suggestions", "created_at", "updated_at"]
-        missing = [f for f in required_fields if f not in data]
-        if missing:
-            result.add_fail("Create draft", f"Missing fields: {missing}")
-            return None
-        
-        # Verify scores structure
-        scores = data.get("scores", {})
-        required_scores = ["seo", "aeo", "readability", "overall", "flesch"]
-        missing_scores = [s for s in required_scores if s not in scores]
-        if missing_scores:
-            result.add_fail("Create draft", f"Missing scores: {missing_scores}")
-            return None
-        
-        # Verify breakdown structure
-        breakdown = data.get("breakdown", {})
-        if "seo" not in breakdown or "aeo" not in breakdown or "keywords" not in breakdown:
-            result.add_fail("Create draft", f"Invalid breakdown structure: {list(breakdown.keys())}")
-            return None
-        
-        # Check breakdown arrays
-        if not isinstance(breakdown["seo"], list) or len(breakdown["seo"]) != 7:
-            result.add_fail("Create draft", f"SEO breakdown should have 7 items, got {len(breakdown.get('seo', []))}")
-            return None
-        
-        if not isinstance(breakdown["aeo"], list) or len(breakdown["aeo"]) != 7:
-            result.add_fail("Create draft", f"AEO breakdown should have 7 items, got {len(breakdown.get('aeo', []))}")
-            return None
-        
-        if not isinstance(breakdown["keywords"], list) or len(breakdown["keywords"]) != 2:
-            result.add_fail("Create draft", f"Keywords breakdown should have 2 items, got {len(breakdown.get('keywords', []))}")
-            return None
-        
-        # Verify word count
-        word_count = data.get("word_count", 0)
-        if word_count <= 0:
-            result.add_fail("Create draft", f"Word count should be > 0, got {word_count}")
-            return None
-        
-        draft_id = data.get("id")
-        result.add_pass(
-            "Create draft",
-            f"id={draft_id[:8]}..., word_count={word_count}, scores={{seo:{scores['seo']}, aeo:{scores['aeo']}, overall:{scores['overall']}}}, elapsed={elapsed:.2f}s"
-        )
-        
-        print(f"   Draft ID: {draft_id}")
-        print(f"   Word count: {word_count}")
-        print(f"   Scores: SEO={scores['seo']}, AEO={scores['aeo']}, Overall={scores['overall']}")
-        print(f"   Breakdown: {len(breakdown['seo'])} SEO items, {len(breakdown['aeo'])} AEO items, {len(breakdown['keywords'])} keywords")
-        print(f"   Suggestions: {len(data.get('suggestions', []))} items")
-        print(f"   Elapsed: {elapsed:.2f}s")
-        
-        return draft_id
-    
-    except Exception as e:
-        result.add_fail("Create draft", f"Exception: {e}")
-        return None
-
-
-def test_list_drafts(session: requests.Session, result: TestResult, expected_id: str):
-    """Test GET /api/content-writer/drafts"""
-    print(f"\n[TEST 3] GET /api/content-writer/drafts - List drafts")
-    
-    try:
-        resp = session.get(f"{API_BASE}/content-writer/drafts", timeout=10)
-        
-        if resp.status_code != 200:
-            result.add_fail("List drafts", f"Status {resp.status_code}: {resp.text[:300]}")
-            return
-        
-        data = resp.json()
-        
-        if not isinstance(data, list):
-            result.add_fail("List drafts", f"Expected array, got {type(data)}")
-            return
-        
-        # Find our draft
-        our_draft = None
-        for d in data:
-            if d.get("id") == expected_id:
-                our_draft = d
-                break
-        
-        if not our_draft:
-            result.add_fail("List drafts", f"Draft {expected_id[:8]}... not found in list of {len(data)} drafts")
-            return
-        
-        # Verify lightweight projection (should NOT have full content)
-        required_fields = ["id", "title", "topic", "keywords", "word_count", "scores", "preview", "created_at", "updated_at"]
-        missing = [f for f in required_fields if f not in our_draft]
-        if missing:
-            result.add_fail("List drafts", f"Missing fields: {missing}")
-            return
-        
-        if "content" in our_draft:
-            result.add_warning("List drafts", "Full 'content' field present in list (should be lightweight)")
-        
-        result.add_pass(
-            "List drafts",
-            f"Found draft in list of {len(data)} items, preview={our_draft.get('preview', '')[:50]}..."
-        )
-        
-        print(f"   Total drafts: {len(data)}")
-        print(f"   Our draft found: {our_draft.get('title')}")
-        print(f"   Preview: {our_draft.get('preview', '')[:80]}...")
-    
-    except Exception as e:
-        result.add_fail("List drafts", f"Exception: {e}")
-
-
-def test_get_draft(session: requests.Session, result: TestResult, draft_id: str):
-    """Test GET /api/content-writer/drafts/{id}"""
-    print(f"\n[TEST 4] GET /api/content-writer/drafts/{draft_id[:8]}... - Get single draft")
-    
-    try:
-        resp = session.get(f"{API_BASE}/content-writer/drafts/{draft_id}", timeout=10)
-        
-        if resp.status_code != 200:
-            result.add_fail("Get draft", f"Status {resp.status_code}: {resp.text[:300]}")
-            return
-        
-        data = resp.json()
-        
-        # Verify full document with content
-        if "content" not in data:
-            result.add_fail("Get draft", "Missing 'content' field in full draft")
-            return
-        
-        if data.get("id") != draft_id:
-            result.add_fail("Get draft", f"ID mismatch: expected {draft_id}, got {data.get('id')}")
-            return
-        
-        content_len = len(data.get("content", ""))
-        result.add_pass("Get draft", f"Full draft retrieved, content length={content_len} chars")
-        
-        print(f"   Title: {data.get('title')}")
-        print(f"   Content length: {content_len} chars")
-        print(f"   Word count: {data.get('word_count')}")
-    
-    except Exception as e:
-        result.add_fail("Get draft", f"Exception: {e}")
-
-
-def test_update_draft(session: requests.Session, result: TestResult, draft_id: str):
-    """Test PATCH /api/content-writer/drafts/{id} - verify re-scoring without LLM"""
-    print(f"\n[TEST 5] PATCH /api/content-writer/drafts/{draft_id[:8]}... - Update draft")
-    
-    try:
-        # Get original scores and updated_at
-        resp = session.get(f"{API_BASE}/content-writer/drafts/{draft_id}", timeout=10)
-        if resp.status_code != 200:
-            result.add_fail("Update draft (pre-check)", f"Failed to get original: {resp.status_code}")
-            return
-        
-        original = resp.json()
-        original_word_count = original.get("word_count", 0)
-        original_scores = original.get("scores", {})
-        original_updated_at = original.get("updated_at")
-        
-        print(f"   Original: word_count={original_word_count}, scores={original_scores}, updated_at={original_updated_at}")
-        
-        # Wait a moment to ensure updated_at changes
-        time.sleep(1)
-        
-        # Update with longer content
-        start = time.time()
-        resp = session.patch(
-            f"{API_BASE}/content-writer/drafts/{draft_id}",
-            json={"content": UPDATED_CONTENT},
-            timeout=15
-        )
-        elapsed = time.time() - start
-        
-        if resp.status_code != 200:
-            result.add_fail("Update draft", f"Status {resp.status_code}: {resp.text[:300]}")
-            return
-        
-        # Verify it completed quickly (< 1s means no LLM call)
-        if elapsed >= 1.0:
-            result.add_warning("Update draft", f"Took {elapsed:.2f}s (expected < 1s for no-LLM re-scoring)")
-        
-        data = resp.json()
-        new_word_count = data.get("word_count", 0)
-        new_scores = data.get("scores", {})
-        new_updated_at = data.get("updated_at")
-        
-        print(f"   Updated: word_count={new_word_count}, scores={new_scores}, updated_at={new_updated_at}")
-        print(f"   Elapsed: {elapsed:.2f}s")
-        
-        # Verify word count increased
-        if new_word_count <= original_word_count:
-            result.add_fail("Update draft", f"Word count did not increase: {original_word_count} -> {new_word_count}")
-            return
-        
-        # Verify scores changed (at least one score should be different)
-        scores_changed = any(
-            new_scores.get(k) != original_scores.get(k)
-            for k in ["seo", "aeo", "readability", "overall"]
-        )
-        if not scores_changed:
-            result.add_warning("Update draft", "Scores did not change after content update")
-        
-        # Verify updated_at changed
-        if new_updated_at == original_updated_at:
-            result.add_fail("Update draft", "updated_at did not change")
-            return
-        
-        result.add_pass(
-            "Update draft",
-            f"word_count {original_word_count}->{new_word_count}, scores updated, elapsed={elapsed:.2f}s (< 1s = no LLM)"
-        )
-    
-    except Exception as e:
-        result.add_fail("Update draft", f"Exception: {e}")
-
-
-def test_score_endpoint(session: requests.Session, result: TestResult):
-    """Test POST /api/content-writer/score - score without persistence"""
-    print(f"\n[TEST 6] POST /api/content-writer/score - Score without persistence")
-    
-    try:
-        test_content = """# Test Article
-META: A test article for scoring.
-TL;DR: This is a test.
-
-## Introduction
-This is a test article with some content.
-
-- Point one
-- Point two
-
-## Frequently Asked Questions
-### Q: Is this a test?
-Yes, this is a test article.
-
-## Key Takeaways
-- Testing works
-- Scoring is fast"""
-        
-        start = time.time()
-        resp = session.post(
-            f"{API_BASE}/content-writer/score",
-            json={
-                "content": test_content,
-                "topic": "test article",
-                "keywords": ["test", "article"]
-            },
-            timeout=15
-        )
-        elapsed = time.time() - start
-        
-        if resp.status_code != 200:
-            result.add_fail("Score endpoint", f"Status {resp.status_code}: {resp.text[:300]}")
-            return
-        
-        data = resp.json()
-        
-        # Verify scores dict returned
-        if "scores" not in data:
-            result.add_fail("Score endpoint", "Missing 'scores' in response")
-            return
-        
-        scores = data.get("scores", {})
-        if not all(k in scores for k in ["seo", "aeo", "readability", "overall"]):
-            result.add_fail("Score endpoint", f"Incomplete scores: {list(scores.keys())}")
-            return
-        
-        # Verify it's fast (no LLM)
-        if elapsed >= 1.0:
-            result.add_warning("Score endpoint", f"Took {elapsed:.2f}s (expected < 1s)")
-        
-        result.add_pass(
-            "Score endpoint",
-            f"scores={{seo:{scores['seo']}, aeo:{scores['aeo']}, overall:{scores['overall']}}}, elapsed={elapsed:.2f}s"
-        )
-        
-        print(f"   Scores: {scores}")
-        print(f"   Elapsed: {elapsed:.2f}s")
-    
-    except Exception as e:
-        result.add_fail("Score endpoint", f"Exception: {e}")
-
-
-def test_delete_draft(session: requests.Session, result: TestResult, draft_id: str):
-    """Test DELETE /api/content-writer/drafts/{id}"""
-    print(f"\n[TEST 7] DELETE /api/content-writer/drafts/{draft_id[:8]}... - Delete draft")
-    
-    try:
-        resp = session.delete(f"{API_BASE}/content-writer/drafts/{draft_id}", timeout=10)
-        
-        if resp.status_code != 200:
-            result.add_fail("Delete draft", f"Status {resp.status_code}: {resp.text[:300]}")
-            return
-        
-        data = resp.json()
-        if not data.get("ok"):
-            result.add_fail("Delete draft", f"Expected {{ok: true}}, got {data}")
-            return
-        
-        result.add_pass("Delete draft", "Returned {ok: true}")
-        
-        # Verify 404 on subsequent GET
-        print(f"   Verifying 404 on GET after delete...")
-        resp = session.get(f"{API_BASE}/content-writer/drafts/{draft_id}", timeout=10)
-        
-        if resp.status_code != 404:
-            result.add_fail("Delete draft (verify 404)", f"Expected 404, got {resp.status_code}")
-            return
-        
-        result.add_pass("Delete draft (verify 404)", "GET after delete returns 404")
-        print(f"   ✅ GET returns 404 as expected")
-    
-    except Exception as e:
-        result.add_fail("Delete draft", f"Exception: {e}")
-
-
-def test_unauth_access(result: TestResult):
-    """Test unauthenticated access returns 401"""
-    print(f"\n[TEST 8] Unauth check - GET /api/content-writer/drafts without cookie")
-    
-    try:
-        # Create new session without login
-        unauth_session = requests.Session()
-        resp = unauth_session.get(f"{API_BASE}/content-writer/drafts", timeout=10)
-        
-        if resp.status_code != 401:
-            result.add_fail("Unauth check", f"Expected 401, got {resp.status_code}")
-            return
-        
-        result.add_pass("Unauth check", "Returns 401 without auth cookie")
-        print(f"   ✅ Returns 401 as expected")
-    
-    except Exception as e:
-        result.add_fail("Unauth check", f"Exception: {e}")
-
+        log(f"⚠ Warning: Could not clean up test users: {e}")
 
 def main():
-    print("="*80)
-    print("CONTENT WRITER 'SAVE DRAFTS' BACKEND TEST")
-    print("="*80)
-    print(f"Base URL: {BASE_URL}")
-    print(f"API Base: {API_BASE}")
-    print(f"Admin: {ADMIN_EMAIL}")
-    print("="*80)
+    log("="*80)
+    log("BACKEND TEST: NEW SIGNUP OTP FLOW")
+    log("="*80)
+    log(f"Base URL: {BASE_URL}")
+    log(f"Admin: {ADMIN_EMAIL}")
     
-    result = TestResult()
+    results = {}
     
-    # Test 1: Login
-    session = login()
-    if not session:
-        print("\n❌ FATAL: Login failed, cannot continue")
-        return
+    try:
+        # Run all scenarios
+        results["Scenario 1: Happy Path"] = test_scenario_1_happy_path()
+        results["Scenario 2: Cooldown"] = test_scenario_2_cooldown()
+        results["Scenario 3: Bad OTP"] = test_scenario_3_bad_otp()
+        results["Scenario 4: Duplicate Email"] = test_scenario_4_duplicate_email()
+        results["Scenario 5: Admin Regression"] = test_scenario_5_admin_regression()
+        
+    finally:
+        # Always cleanup
+        cleanup_test_users()
     
-    result.add_pass("Auth", f"Login successful as {ADMIN_EMAIL}")
+    # Summary
+    log("\n" + "="*80)
+    log("TEST SUMMARY")
+    log("="*80)
     
-    # Test 2: Create draft
-    draft_id = test_create_draft(session, result)
-    if not draft_id:
-        print("\n❌ FATAL: Create draft failed, cannot continue")
-        result.print_summary()
-        return
+    passed = sum(1 for v in results.values() if v)
+    total = len(results)
     
-    # Test 3: List drafts
-    test_list_drafts(session, result, draft_id)
+    for scenario, result in results.items():
+        status = "✅ PASSED" if result else "❌ FAILED"
+        log(f"{status}: {scenario}")
     
-    # Test 4: Get single draft
-    test_get_draft(session, result, draft_id)
+    log(f"\nTotal: {passed}/{total} scenarios passed")
     
-    # Test 5: Update draft (verify re-scoring)
-    test_update_draft(session, result, draft_id)
-    
-    # Test 6: Score endpoint (no persistence)
-    test_score_endpoint(session, result)
-    
-    # Test 7: Delete draft
-    test_delete_draft(session, result, draft_id)
-    
-    # Test 8: Unauth check
-    test_unauth_access(result)
-    
-    # Print summary
-    result.print_summary()
-    
-    # Exit with appropriate code
-    if result.failed:
-        exit(1)
+    if passed == total:
+        log("\n🎉 ALL TESTS PASSED!")
+        return 0
     else:
-        exit(0)
-
+        log(f"\n⚠️  {total - passed} test(s) failed")
+        return 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
